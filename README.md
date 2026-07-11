@@ -8,13 +8,13 @@ A browser-based code editor and terminal, like [Session Multiplexer Code Shell](
 
 ## How it works
 
-1. **Project creation** — `POST /project` on `init-service` copies a base template (`node-js` or `python`) from S3/R2 into `code/<replId>`, the same way the single-host version does. This step only prepares storage; it does not start any compute.
-2. **Pod scheduling** — when a user opens a project, the frontend calls `POST /start` on `orchestrator-simple` with the `replId`. The orchestrator reads a parameterized Kubernetes manifest ([`service.yaml`](orchestrator-simple/service.yaml)), substitutes `service_name` → `replId` across every document, and creates each resource via the Kubernetes API (`@kubernetes/client-node`):
+1. **Project creation** : `POST /project` on `init-service` copies a base template (`node-js` or `python`) from S3/R2 into `code/<replId>`, the same way the single-host version does. This step only prepares storage; it does not start any compute.
+2. **Pod scheduling** : when a user opens a project, the frontend calls `POST /start` on `orchestrator-simple` with the `replId`. The orchestrator reads a parameterized Kubernetes manifest ([`service.yaml`](orchestrator-simple/service.yaml)), substitutes `service_name` → `replId` across every document, and creates each resource via the Kubernetes API (`@kubernetes/client-node`):
    - a **Deployment** running the `runner` image, with an **init container** that `aws s3 cp`s that project's files from the bucket into a mounted `emptyDir` volume before the main container starts
    - a **Service** exposing the pod's port `3001` (WebSocket) and `3000` (the user's own running app)
    - an **Ingress** routing `<replId>.<domain>` (two configured hostnames) to those ports
-3. **Editing & terminal** — the frontend connects a Socket.IO client directly to `ws://<replId>.<domain>`. The `runner` inside that specific pod identifies which project it's serving from the **subdomain in the request's Host header** (not a query param, since there's exactly one project per pod). File read/write and terminal I/O work the same way as the single-host version, except everything happens inside `/workspace` — the volume the init container populated — rather than a shared local `tmp/` folder.
-4. **Live preview** — the frontend's Output panel points its iframe at `http://<replId>.<domain>`, which the Ingress routes to the pod's port `3000`. If the user manually starts something listening on that port inside their terminal, it becomes reachable at a real, per-project URL — unlike the single-host version's hardcoded `localhost:3000`.
+3. **Editing & terminal** : the frontend connects a Socket.IO client directly to `ws://<replId>.<domain>`. The `runner` inside that specific pod identifies which project it's serving from the **subdomain in the request's Host header** (not a query param, since there's exactly one project per pod). File read/write and terminal I/O work the same way as the single-host version, except everything happens inside `/workspace` (the volume the init container populated) rather than a shared local `tmp/` folder.
+4. **Live preview** : the frontend's Output panel points its iframe at `http://<replId>.<domain>`, which the Ingress routes to the pod's port `3000`. If the user manually starts something listening on that port inside their terminal, it becomes reachable at a real, per-project URL — unlike the single-host version's hardcoded `localhost:3000`.
 
 ## Architecture
 
@@ -40,8 +40,8 @@ Frontend (Vite + React)
                                                                               user's own process on :3000
 ```
 
-- **One pod per project.** Each `replId` gets its own Deployment, Service, and Ingress — real isolation (separate filesystem, CPU/memory requests+limits) instead of every user sharing one backend process.
-- **Subdomain-based routing, not path-based.** Two ingress hosts are wired per project (`<replId>.peetcode.com`, `<replId>.autogpt-cloud.com` in the sample manifest) — swap these for your own domain(s) in `service.yaml`.
+- **One pod per project.** Each `replId` gets its own Deployment, Service, and Ingress. Real isolation (separate filesystem, CPU/memory requests+limits) instead of every user sharing one backend process.
+- **Subdomain-based routing, not path-based.** Two ingress hosts are wired per project (`<replId>.peetcode.com`, `<replId>.autogpt-cloud.com` in the sample manifest). Swap these for your own domain(s) in `service.yaml`.
 - **Storage is still the source of truth.** Pods are disposable; nothing written outside `/workspace` survives a pod restart, and `/workspace` itself is only ever seeded once, at pod startup, by the init container.
 
 ## Tech stack
