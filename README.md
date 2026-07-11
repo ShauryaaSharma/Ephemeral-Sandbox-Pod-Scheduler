@@ -158,14 +158,14 @@ Create a project, open it, and the frontend will call `/start` and wait for its 
 
 ## Known limitations
 
-- **No automatic run step, still.** Same gap as the single-host version — nothing runs `npm install`/starts the user's app automatically inside the pod. The Output iframe will only show something once the user manually starts a process on port 3000 in their terminal.
-- **Credentials are inlined in the manifest template.** `service.yaml`'s init container sets `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` as plain string values substituted into the YAML — these belong in a Kubernetes Secret, not in a template committed to source control.
+- **No automatic run step, still.** Same gap as the single-host version. Nothing runs `npm install`/starts the user's app automatically inside the pod. The Output iframe will only show something once the user manually starts a process on port 3000 in their terminal.
+- **Credentials are inlined in the manifest template.** `service.yaml`'s init container sets `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` as plain string values substituted into the YAML. These belong in a Kubernetes Secret, not in a template committed to source control.
 - **No pod teardown.** `orchestrator-simple` only exposes `/start`; nothing deletes a project's Deployment/Service/Ingress when the user is done, so pods accumulate indefinitely unless cleaned up manually or by an external process.
-- **No auth or existence checks**, same as the single-host version — anyone who knows a `replId` can hit `/start` for it and reach its pod.
+- **No auth or existence checks**, same as the single-host version, anyone who knows a `replId` can hit `/start` for it and reach its pod.
 - **Terminal session cleanup bug carried over.** `TerminalManager` in `runner/src/pty.ts` still deletes sessions by PID instead of by the ID they were stored under.
-- **No resource-usage guardrails beyond the static `resources.limits` in the manifest** — a single project can still exhaust its pod's allotted CPU/memory with no per-job monitoring or alerting.
+- **No resource-usage guardrails beyond the static `resources.limits` in the manifest**, A single project can still exhaust its pod's allotted CPU/memory with no per-job monitoring or alerting.
 
-This repo is the second iteration of [Session Multiplexer Code Shell](#) — same editor/terminal experience, rebuilt around per-project Kubernetes scheduling instead of a single shared host.
+This repo is the second iteration of [Session Multiplexer Code Shell](#), Same editor/terminal experience, rebuilt around per-project Kubernetes scheduling instead of a single shared host.
 
 ## License
 
