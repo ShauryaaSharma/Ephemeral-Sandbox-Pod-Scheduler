@@ -4,7 +4,7 @@ Browser IDE that provisions a real, isolated Kubernetes pod per project on deman
 
 ## What this is
 
-A browser-based code editor and terminal, like [Session Multiplexer Code Shell](#), rebuilt so every project gets its **own isolated compute** instead of sharing one host. Opening a project schedules a dedicated Kubernetes pod just for it — with its own filesystem, CPU/memory limits, and a real shell — reachable at its own subdomain, and torn down independently of every other project.
+A browser-based code editor and terminal, like [Session Multiplexer Code Shell](#), rebuilt so every project gets its **own isolated compute** instead of sharing one host. Opening a project schedules a dedicated Kubernetes pod just for it, with its own filesystem, CPU/memory limits, and a real shell, reachable at its own subdomain, and torn down independently of every other project.
 
 ## How it works
 
