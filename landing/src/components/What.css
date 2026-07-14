@@ -1,0 +1,53 @@
+.what {
+  padding: 130px 24px 90px;
+}
+
+.what-inner {
+  max-width: 1180px;
+  margin: 0 auto;
+}
+
+.what-grid {
+  margin-top: 64px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 22px;
+}
+
+.what-card {
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: var(--surface);
+  padding: 30px 28px;
+  transition: border-color 0.3s ease;
+}
+
+.what-card:hover {
+  border-color: var(--f-color);
+}
+
+.what-card-icon {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  font-size: 1.3rem;
+  color: var(--f-color);
+  background: color-mix(in srgb, var(--f-color) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--f-color) 30%, transparent);
+  margin-bottom: 20px;
+}
+
+.what-card h3 {
+  font-size: 1.12rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  margin-bottom: 12px;
+}
+
+.what-card p {
+  color: var(--muted);
+  font-size: 0.92rem;
+  line-height: 1.7;
+}
