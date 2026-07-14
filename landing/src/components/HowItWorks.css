@@ -1,0 +1,113 @@
+.how {
+  padding: 100px 24px;
+  background:
+    radial-gradient(ellipse 60% 45% at 85% 15%, rgba(167, 139, 250, 0.07), transparent),
+    radial-gradient(ellipse 55% 40% at 10% 85%, rgba(34, 211, 238, 0.06), transparent);
+}
+
+.how-inner {
+  max-width: 940px;
+  margin: 0 auto;
+}
+
+.how-header {
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin-bottom: 80px;
+}
+
+.how-steps {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 56px;
+}
+
+.how-rail {
+  position: absolute;
+  left: 27px;
+  top: 10px;
+  bottom: 10px;
+  width: 2px;
+  background: linear-gradient(180deg, var(--accent), var(--violet), var(--cyan), var(--green));
+  opacity: 0.35;
+  border-radius: 2px;
+}
+
+.how-step {
+  display: flex;
+  gap: 28px;
+  position: relative;
+}
+
+.how-num {
+  flex-shrink: 0;
+  width: 56px;
+  height: 56px;
+  border-radius: 16px;
+  display: grid;
+  place-items: center;
+  font-family: var(--mono);
+  font-weight: 700;
+  font-size: 0.95rem;
+  color: var(--s-color);
+  background: var(--surface);
+  border: 1.5px solid var(--s-color);
+  box-shadow: 0 0 26px -8px var(--s-color);
+  position: relative;
+  z-index: 1;
+}
+
+.how-content {
+  padding-top: 4px;
+}
+
+.how-title-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.how-content h3 {
+  font-size: 1.3rem;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+}
+
+.how-chip {
+  font-family: var(--mono);
+  font-size: 0.74rem;
+  color: var(--s-color);
+  border: 1px solid color-mix(in srgb, var(--s-color) 40%, transparent);
+  background: color-mix(in srgb, var(--s-color) 9%, transparent);
+  padding: 4px 11px;
+  border-radius: 7px;
+}
+
+.how-content p {
+  color: var(--muted);
+  line-height: 1.75;
+  font-size: 0.95rem;
+  max-width: 66ch;
+}
+
+@media (max-width: 600px) {
+  .how-rail {
+    left: 21px;
+  }
+
+  .how-num {
+    width: 44px;
+    height: 44px;
+    border-radius: 12px;
+    font-size: 0.82rem;
+  }
+
+  .how-step {
+    gap: 18px;
+  }
+}
