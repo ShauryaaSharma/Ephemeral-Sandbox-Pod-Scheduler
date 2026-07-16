@@ -40,6 +40,7 @@ export default function Soon() {
       <footer className="footer">
         <span className="footer-name">ephemeral-sandbox-pod-scheduler</span>
         <span className="footer-meta">MIT License · one pod per project</span>
+        <span className="footer-meta">Built by SHAURYA SHARMA</span>
       </footer>
     </>
   )
