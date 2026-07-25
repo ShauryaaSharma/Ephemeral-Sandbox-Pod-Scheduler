@@ -27,9 +27,15 @@ spec:
               echo "Resources copied from S3";
           env:
             - name: AWS_ACCESS_KEY_ID
-              value: "your_aws_key_id"
+              valueFrom:
+                secretKeyRef:
+                  name: sandbox-secrets
+                  key: AWS_ACCESS_KEY_ID
             - name: AWS_SECRET_ACCESS_KEY
-              value: "your_aws_secret"
+              valueFrom:
+                secretKeyRef:
+                  name: sandbox-secrets
+                  key: AWS_SECRET_ACCESS_KEY
           volumeMounts:
             - name: workspace-volume
               mountPath: /workspace
@@ -39,6 +45,30 @@ spec:
           ports:
             - containerPort: 3001
             - containerPort: 3000
+          env:
+            - name: REPL_ID
+              value: service_name
+            - name: OWNER_ID
+              value: owner_id_placeholder
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: sandbox-secrets
+                  key: AWS_ACCESS_KEY_ID
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: sandbox-secrets
+                  key: AWS_SECRET_ACCESS_KEY
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: sandbox-secrets
+                  key: JWT_SECRET
+            - name: S3_BUCKET
+              value: "your-bucket-name"
+            - name: S3_ENDPOINT
+              value: "your-s3-endpoint"
           volumeMounts:
             - name: workspace-volume
               mountPath: /workspace
@@ -95,4 +125,61 @@ spec:
           service:
             name: service_name
             port:
-              number: 3000 
+              number: 3000
+---
+# NOTE: NetworkPolicy objects are only enforced if your cluster's CNI plugin
+# supports it (Calico, Cilium, Weave Net, etc.) - plain flannel does NOT
+# enforce these rules; they get created but silently ignored. If you're on
+# flannel, switch to Canal (flannel + Calico's policy engine) or a
+# policy-enforcing CNI, or this whole block is a no-op.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: service_name
+spec:
+  podSelector:
+    matchLabels:
+      app: service_name
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Only the ingress controller may reach this pod's ws (3001) and user-app
+    # (3000) ports - blocks every other pod, including other projects', from
+    # connecting directly. Adjust the namespace label if your ingress
+    # controller isn't in "ingress-nginx" (see k8s/ingress-controller.yaml,
+    # which installs it there).
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 3001
+        - protocol: TCP
+          port: 3000
+  egress:
+    # DNS - needed to resolve S3/R2 endpoints and package registries (npm/pip).
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Everything else EXCEPT the cluster's own internal ranges. This is what
+    # stops one project's pod from reaching another project's pod or the
+    # Kubernetes API server, while still allowing npm/pip installs and S3/R2
+    # access out to the open internet. The two CIDRs below are common
+    # kubeadm defaults - confirm (or replace) them for your cluster:
+    #   pod CIDR:     kubectl cluster-info dump | grep -m1 cluster-cidr
+    #   service CIDR: check your provider's docs (EKS/GKE/AKS/k3s all default
+    #                 to different ranges); the API server's ClusterIP
+    #                 (`kubectl get svc kubernetes`) falls inside it.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.244.0.0/16 # pod CIDR - replace with your cluster's
+              - 10.96.0.0/12  # service CIDR (covers the API server) - replace with your cluster's
