@@ -1,0 +1,10 @@
+# Shared ownership SQLite DB (init-service + orchestrator-simple), see OWNERSHIP_DB_PATH
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Never commit a filled-in k8s Secret manifest - use k8s/create-secret.sh instead
+*.secret.yaml
+secret.yaml

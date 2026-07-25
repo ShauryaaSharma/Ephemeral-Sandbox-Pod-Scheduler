@@ -2,14 +2,25 @@ import express from "express";
 import dotenv from "dotenv"
 import cors from "cors";
 dotenv.config()
+import { randomUUID } from "crypto";
 import { copyS3Folder } from "./aws";
+import { requireAuth, signToken } from "./auth";
+import { createProject, getProject } from "./db";
 
 const app = express();
 app.use(express.json());
 app.use(cors())
 
-app.post("/project", async (req, res) => {
-    // Hit a database to ensure this slug isn't taken already
+// Bootstraps an anonymous, device-bound identity - there's no login/password
+// in this project. The frontend calls this once, caches the token, and sends
+// it as a bearer token on every subsequent request.
+app.post("/auth/session", (req, res) => {
+    const userId = randomUUID();
+    const token = signToken(userId);
+    res.send({ token, userId });
+});
+
+app.post("/project", requireAuth, async (req, res) => {
     const { replId, language } = req.body;
 
     if (!replId) {
@@ -17,7 +28,13 @@ app.post("/project", async (req, res) => {
         return;
     }
 
+    if (getProject(replId)) {
+        res.status(409).send("replId already taken");
+        return;
+    }
+
     await copyS3Folder(`base/${language}`, `code/${replId}`);
+    createProject(replId, req.userId as string);
 
     res.send("Project created");
 });

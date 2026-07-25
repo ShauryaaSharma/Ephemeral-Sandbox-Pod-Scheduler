@@ -7,16 +7,70 @@ import styled from '@emotion/styled';
 import { Output } from './Output';
 import { TerminalComponent as Terminal } from './Terminal';
 import axios from 'axios';
+import { authHeaders, getAuthToken } from '../lib/auth';
+
+interface ProjectHealth {
+    healthStatus: 'unknown' | 'healthy' | 'unhealthy';
+    restartCount: number;
+    unhealthyReason: string | null;
+}
+
+const HEALTH_POLL_INTERVAL_MS = 20000;
+
+// Polls orchestrator-simple's per-project status endpoint so the user sees
+// "this project's pod is unhealthy" instead of a silently broken terminal
+// (see Priority 4's crash-loop detection).
+function useProjectHealth(replId: string): ProjectHealth | null {
+    const [health, setHealth] = useState<ProjectHealth | null>(null);
+
+    useEffect(() => {
+        if (!replId) return;
+        let cancelled = false;
+
+        const poll = async () => {
+            try {
+                const headers = await authHeaders();
+                const { data } = await axios.get(`http://localhost:3002/projects/${replId}/status`, { headers });
+                if (!cancelled) setHealth(data);
+            } catch (err) {
+                console.error('failed to poll project health', err);
+            }
+        };
+
+        poll();
+        const interval = setInterval(poll, HEALTH_POLL_INTERVAL_MS);
+        return () => {
+            cancelled = true;
+            clearInterval(interval);
+        };
+    }, [replId]);
+
+    return health;
+}
+
+const UnhealthyBanner = styled.div`
+  background: #b00020;
+  color: white;
+  padding: 10px 16px;
+  font-size: 14px;
+`;
 
 function useSocket(replId: string) {
     const [socket, setSocket] = useState<Socket | null>(null);
 
     useEffect(() => {
-        const newSocket = io(`ws://${replId}.peetcode.com`);
-        setSocket(newSocket);
+        let cancelled = false;
+        let createdSocket: Socket | null = null;
+
+        getAuthToken().then((token) => {
+            if (cancelled) return;
+            createdSocket = io(`ws://${replId}.peetcode.com`, { auth: { token } });
+            setSocket(createdSocket);
+        });
 
         return () => {
-            newSocket.disconnect();
+            cancelled = true;
+            createdSocket?.disconnect();
         };
     }, [replId]);
 
@@ -60,7 +114,8 @@ export const CodingPage = () => {
     
     useEffect(() => {
         if (replId) {
-            axios.post(`http://localhost:3002/start`, { replId })
+            authHeaders()
+                .then((headers) => axios.post(`http://localhost:3002/start`, { replId }, { headers }))
                 .then(() => setPodCreated(true))
                 .catch((err) => console.error(err));
         }
@@ -81,6 +136,7 @@ export const CodingPagePostPodCreation = () => {
     const [fileStructure, setFileStructure] = useState<RemoteFile[]>([]);
     const [selectedFile, setSelectedFile] = useState<File | undefined>(undefined);
     const [showOutput, setShowOutput] = useState(false);
+    const health = useProjectHealth(replId);
 
     useEffect(() => {
         if (socket) {
@@ -115,6 +171,11 @@ export const CodingPagePostPodCreation = () => {
 
     return (
         <Container>
+            {health?.healthStatus === 'unhealthy' && (
+                <UnhealthyBanner>
+                    This project's pod is unhealthy ({health.unhealthyReason ?? 'crash-looping'}, {health.restartCount} restarts) - you may need to fix your code and restart it.
+                </UnhealthyBanner>
+            )}
              <ButtonContainer>
                 <button onClick={() => setShowOutput(!showOutput)}>See output</button>
             </ButtonContainer>
