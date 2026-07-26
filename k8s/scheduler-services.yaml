@@ -1,0 +1,173 @@
+# Deploys init-service and orchestrator-simple themselves as long-running
+# pods inside the same cluster they manage - as opposed to service.yaml,
+# which orchestrator-simple applies dynamically per project. This file is
+# applied once, manually, like the other files in k8s/.
+#
+# Prerequisites:
+#   - k8s/rbac.yaml applied (gives orchestrator-simple's ServiceAccount the
+#     permissions it needs)
+#   - k8s/create-secret.sh run (the sandbox-secrets Secret referenced below)
+#   - both images built and pushed (see README "Deploying the schedulers")
+#   - a StorageClass supporting ReadWriteMany - see the PVC note below
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: scheduler-config
+data:
+  # init-service only
+  S3_BUCKET: "your-bucket-name"
+  S3_ENDPOINT: "your-s3-endpoint"
+  RATE_LIMIT_MAX: "5"
+  RATE_LIMIT_WINDOW_SECONDS: "60"
+  # orchestrator-simple only
+  WS_DOMAIN: "peetcode.com"
+  APP_DOMAIN: "autogpt-cloud.com"
+  IDLE_TIMEOUT_MINUTES: "15"
+  REAPER_INTERVAL_SECONDS: "60"
+  HEALTH_CHECK_INTERVAL_SECONDS: "30"
+  CRASH_RESTART_THRESHOLD: "5"
+  # shared by both - the SQLite ownership file on the PVC mounted below
+  OWNERSHIP_DB_PATH: "/data/ownership.db"
+---
+# ReadWriteMany because both init-service's pod and orchestrator-simple's pod
+# mount this at the same time (see README "Auth & ownership" trade-off note
+# on why they share a SQLite file instead of one exposing an API to the
+# other). Not every StorageClass supports RWX - AWS EBS/GCE PD/Azure Disk are
+# all ReadWriteOnce-only. You need something like EFS (AWS), Filestore (GCP),
+# Azure Files, NFS, or Longhorn/Rook-Ceph. If you don't have one available,
+# the alternative is running both containers in a single Pod sharing an
+# emptyDir instead of a PVC - works on any cluster, at the cost of coupling
+# their lifecycles together.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ownership-db
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 1Gi
+  # storageClassName: your-rwx-storage-class   # uncomment and set if your cluster's default StorageClass isn't RWX-capable
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: init-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: init-service
+  template:
+    metadata:
+      labels:
+        app: init-service
+    spec:
+      # No Kubernetes API access needed - init-service only ever talks to S3/R2.
+      automountServiceAccountToken: false
+      volumes:
+        - name: ownership-db
+          persistentVolumeClaim:
+            claimName: ownership-db
+      containers:
+        - name: init-service
+          image: <your-registry>/init-service:latest
+          ports:
+            - containerPort: 3001
+          envFrom:
+            - configMapRef:
+                name: scheduler-config
+            - secretRef:
+                name: sandbox-secrets
+          volumeMounts:
+            - name: ownership-db
+              mountPath: /data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: init-service
+spec:
+  selector:
+    app: init-service
+  ports:
+    - port: 3001
+      targetPort: 3001
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orchestrator-simple
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: orchestrator-simple
+  template:
+    metadata:
+      labels:
+        app: orchestrator-simple
+    spec:
+      serviceAccountName: sandbox-orchestrator # see k8s/rbac.yaml
+      volumes:
+        - name: ownership-db
+          persistentVolumeClaim:
+            claimName: ownership-db
+      containers:
+        - name: orchestrator-simple
+          image: <your-registry>/orchestrator-simple:latest
+          ports:
+            - containerPort: 3002
+          envFrom:
+            - configMapRef:
+                name: scheduler-config
+            - secretRef:
+                name: sandbox-secrets
+          volumeMounts:
+            - name: ownership-db
+              mountPath: /data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orchestrator-simple
+spec:
+  selector:
+    app: orchestrator-simple
+  ports:
+    - port: 3002
+      targetPort: 3002
+---
+# init.<WS_DOMAIN> and api.<WS_DOMAIN> are ordinary single-level subdomains,
+# so they're already covered by the same *.<WS_DOMAIN> wildcard certificate
+# from k8s/wildcard-certificate.yaml - no extra cert-manager work needed if
+# you've done the TLS setup (see README "TLS via cert-manager").
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: scheduler-services
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: init.peetcode.com # <-- must resolve to your ingress controller and match WS_DOMAIN above
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: init-service
+                port:
+                  number: 3001
+    - host: api.peetcode.com # <-- must resolve to your ingress controller and match WS_DOMAIN above
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: orchestrator-simple
+                port:
+                  number: 3002

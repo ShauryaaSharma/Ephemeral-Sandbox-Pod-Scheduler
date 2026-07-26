@@ -67,9 +67,21 @@ export function initWs(httpServer: HttpServer) {
         }
 
         touch();
-        socket.emit("loaded", {
-            rootContent: await fetchDir("/workspace", "")
-        });
+        try {
+            socket.emit("loaded", {
+                rootContent: await fetchDir("/workspace", "")
+            });
+        } catch (err) {
+            // Any async handler in this file rejecting used to crash the
+            // whole process (Node terminates on unhandled rejections) -
+            // taking down every other session in this pod over one bad file
+            // op. /workspace should always exist by the time a socket
+            // connects (the init container populates it before this
+            // container even starts), but there's no good reason to let a
+            // filesystem hiccup here kill the pod instead of just this load.
+            console.error(`failed to load workspace contents for ${replId}:`, err);
+            socket.emit("loaded", { rootContent: [] });
+        }
 
         initHandlers(socket, replId);
     });
@@ -86,16 +98,26 @@ function initHandlers(socket: Socket, replId: string) {
 
     socket.on("fetchDir", async (dir: string, callback) => {
         touch();
-        const dirPath = `/workspace/${dir}`;
-        const contents = await fetchDir(dirPath, dir);
-        callback(contents);
+        try {
+            const dirPath = `/workspace/${dir}`;
+            const contents = await fetchDir(dirPath, dir);
+            callback(contents);
+        } catch (err) {
+            console.error(`fetchDir failed for ${replId} (${dir}):`, err);
+            callback([]);
+        }
     });
 
     socket.on("fetchContent", async ({ path: filePath }: { path: string }, callback) => {
         touch();
-        const fullPath = `/workspace/${filePath}`;
-        const data = await fetchFileContent(fullPath);
-        callback(data);
+        try {
+            const fullPath = `/workspace/${filePath}`;
+            const data = await fetchFileContent(fullPath);
+            callback(data);
+        } catch (err) {
+            console.error(`fetchContent failed for ${replId} (${filePath}):`, err);
+            callback("");
+        }
     });
 
     // TODO: contents should be diff, not full file
@@ -103,23 +125,38 @@ function initHandlers(socket: Socket, replId: string) {
     // Should be throttled before updating S3 (or use an S3 mount)
     socket.on("updateContent", async ({ path: filePath, content }: { path: string, content: string }) => {
         touch();
-        const fullPath =  `/workspace/${filePath}`;
-        await saveFile(fullPath, content);
-        await saveToS3(`code/${replId}`, filePath, content);
+        try {
+            const fullPath = `/workspace/${filePath}`;
+            await saveFile(fullPath, content);
+            await saveToS3(`code/${replId}`, filePath, content);
+        } catch (err) {
+            // No ack callback on this event today, so there's nothing to
+            // report back to the client - but the process must survive a
+            // bad path or a transient S3 error regardless.
+            console.error(`updateContent failed for ${replId} (${filePath}):`, err);
+        }
     });
 
     socket.on("requestTerminal", async () => {
         touch();
-        terminalManager.createPty(socket.id, replId, (data, id) => {
-            socket.emit('terminal', {
-                data: Buffer.from(data,"utf-8")
+        try {
+            terminalManager.createPty(socket.id, replId, (data, id) => {
+                socket.emit('terminal', {
+                    data: Buffer.from(data,"utf-8")
+                });
             });
-        });
+        } catch (err) {
+            console.error(`requestTerminal failed for ${replId}:`, err);
+        }
     });
 
     socket.on("terminalData", async ({ data }: { data: string, terminalId: number }) => {
         touch();
-        terminalManager.write(socket.id, data);
+        try {
+            terminalManager.write(socket.id, data);
+        } catch (err) {
+            console.error(`terminalData write failed for ${replId}:`, err);
+        }
     });
 
 }

@@ -1,0 +1,67 @@
+# Grants orchestrator-simple exactly the permissions it needs to run inside
+# the cluster it manages, via an in-cluster ServiceAccount instead of a
+# mounted admin kubeconfig. @kubernetes/client-node's KubeConfig().loadFromDefault()
+# automatically falls back to this ServiceAccount's mounted token when no
+# kubeconfig file is present and it detects it's running inside a pod - no
+# code changes or extra env vars needed, just reference this ServiceAccount
+# in orchestrator-simple's Deployment (see k8s/scheduler-services.yaml).
+#
+# Cluster-scoped (ClusterRole, not Role) because namespace-per-project
+# (see README "Namespace isolation") means orchestrator-simple creates,
+# lists, and deletes resources across namespaces it doesn't know about
+# ahead of time - a namespace-scoped Role can't do that.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sandbox-orchestrator
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sandbox-orchestrator
+rules:
+  # Namespace-per-project: create at /start, delete at /stop (see namespace.ts)
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["create", "delete", "get", "list", "watch"]
+  # Service: created alongside the Deployment; Pods: read-only, for crash-loop
+  # detection and resource-usage lookups (see monitor.ts/healthMonitor.ts)
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["create", "delete", "get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  # Secrets are namespace-scoped - sandbox-secrets only exists in whatever
+  # namespace k8s/create-secret.sh created it in (default: "default"), so it
+  # has to be read from there and copied into each new project namespace
+  # (see namespace.ts's copySandboxSecret) for the runner's secretKeyRef envs
+  # to resolve at all.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["create", "delete", "get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "networkpolicies"]
+    verbs: ["create", "delete", "get", "list", "watch"]
+  # Read-only, for GET /status and the health monitor's resource-usage checks
+  # (requires metrics-server installed - see README prerequisites)
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sandbox-orchestrator
+subjects:
+  - kind: ServiceAccount
+    name: sandbox-orchestrator
+    namespace: default
+roleRef:
+  kind: ClusterRole
+  name: sandbox-orchestrator
+  apiGroup: rbac.authorization.k8s.io

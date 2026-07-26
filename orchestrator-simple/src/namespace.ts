@@ -8,12 +8,34 @@ export function namespaceForProject(replId: string): string {
     return `sandbox-${replId}`;
 }
 
+// Kubernetes Secrets are namespace-scoped - the sandbox-secrets Secret
+// created once by k8s/create-secret.sh only exists in whatever namespace it
+// was created in (SECRETS_SOURCE_NAMESPACE, default "default"). Found by
+// actually starting a project: the runner pod's secretKeyRef envs couldn't
+// resolve at all in its own fresh namespace, since nothing had ever copied
+// the Secret there.
+const SECRETS_SOURCE_NAMESPACE = process.env.SECRETS_SOURCE_NAMESPACE ?? "default";
+const SANDBOX_SECRET_NAME = "sandbox-secrets";
+
 function isConflict(err: unknown): boolean {
     return (err as { statusCode?: number })?.statusCode === 409;
 }
 
 function isNotFound(err: unknown): boolean {
     return (err as { statusCode?: number })?.statusCode === 404;
+}
+
+async function copySandboxSecret(coreV1Api: CoreV1Api, targetNamespace: string): Promise<void> {
+    const { body: source } = await coreV1Api.readNamespacedSecret(SANDBOX_SECRET_NAME, SECRETS_SOURCE_NAMESPACE);
+    try {
+        await coreV1Api.createNamespacedSecret(targetNamespace, {
+            metadata: { name: SANDBOX_SECRET_NAME },
+            type: source.type,
+            data: source.data,
+        });
+    } catch (err) {
+        if (!isConflict(err)) throw err;
+    }
 }
 
 // Idempotent: safe to call even if the namespace already exists (e.g. a
@@ -27,6 +49,7 @@ export async function ensureNamespace(coreV1Api: CoreV1Api, replId: string): Pro
     } catch (err) {
         if (!isConflict(err)) throw err;
     }
+    await copySandboxSecret(coreV1Api, namespace);
     return namespace;
 }
 
