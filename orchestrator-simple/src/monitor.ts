@@ -1,6 +1,6 @@
 import { CoreV1Api, Metrics } from "@kubernetes/client-node";
+import { namespaceForProject } from "./namespace";
 
-const NAMESPACE = "default";
 const RESTART_THRESHOLD = Number(process.env.CRASH_RESTART_THRESHOLD) || 5;
 
 export interface PodHealth {
@@ -16,7 +16,7 @@ export interface PodHealth {
 // Service/NetworkPolicy already use to target this project's pod.
 export async function checkPodHealth(coreV1Api: CoreV1Api, replId: string): Promise<PodHealth> {
     const { body } = await coreV1Api.listNamespacedPod(
-        NAMESPACE,
+        namespaceForProject(replId),
         undefined,
         undefined,
         undefined,
@@ -63,7 +63,7 @@ export async function getPodResourceUsage(
     replId: string
 ): Promise<PodResourceUsage | null> {
     try {
-        const metrics = await metricsClient.getPodMetrics(NAMESPACE, { labelSelector: `app=${replId}` });
+        const metrics = await metricsClient.getPodMetrics(namespaceForProject(replId), { labelSelector: `app=${replId}` });
         const pod = metrics.items[0];
         const container = pod?.containers.find((c) => c.name === "runner") ?? pod?.containers[0];
         if (!container) return null;

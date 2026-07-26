@@ -6,6 +6,7 @@ import { randomUUID } from "crypto";
 import { copyS3Folder } from "./aws";
 import { requireAuth, signToken } from "./auth";
 import { createProject, getProject } from "./db";
+import { rateLimit } from "./rateLimit";
 
 const app = express();
 app.use(express.json());
@@ -20,7 +21,7 @@ app.post("/auth/session", (req, res) => {
     res.send({ token, userId });
 });
 
-app.post("/project", requireAuth, async (req, res) => {
+app.post("/project", requireAuth, rateLimit, async (req, res) => {
     const { replId, language } = req.body;
 
     if (!replId) {

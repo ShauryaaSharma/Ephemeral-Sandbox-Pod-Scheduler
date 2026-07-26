@@ -1,0 +1,26 @@
+# One certificate, issued once, covering both of the domains projects are
+# served on - deliberately NOT one certificate per project. Kubernetes lets
+# an Ingress skip its own `tls:` block and fall back to the ingress
+# controller's cluster-wide default certificate (see the
+# --default-ssl-certificate arg in k8s/ingress-controller.yaml), so every
+# <replId>.<domain> subdomain gets HTTPS from this single cert without
+# ever asking Let's Encrypt for a new one. That matters here specifically
+# because Let's Encrypt rate-limits certs per registered domain per week -
+# issuing one per ephemeral project would burn through that fast.
+#
+# Replace peetcode.com / autogpt-cloud.com below with your own domains
+# (must match WS_DOMAIN / APP_DOMAIN in orchestrator-simple's .env and
+# VITE_WS_DOMAIN / VITE_APP_DOMAIN in the frontend's .env).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: wildcard-tls
+  namespace: ingress-nginx
+spec:
+  secretName: wildcard-tls
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer
+  dnsNames:
+    - "*.peetcode.com"
+    - "*.autogpt-cloud.com"

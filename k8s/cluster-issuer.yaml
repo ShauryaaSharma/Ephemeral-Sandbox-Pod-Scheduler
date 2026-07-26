@@ -1,0 +1,37 @@
+# Requires cert-manager installed first:
+#   kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.14.5/cert-manager.yaml
+#
+# Wildcard certs (needed since every project gets its own <replId>.<domain>
+# subdomain) can only be validated via a DNS01 challenge - HTTP01 doesn't
+# support wildcards. This template uses Cloudflare as the DNS solver; swap
+# the `cloudflare` block for your provider's solver - see
+# https://cert-manager.io/docs/configuration/acme/dns01/ for the full list
+# (Route53, Google Cloud DNS, Azure DNS, etc. are all supported).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cloudflare-api-token
+  namespace: cert-manager
+type: Opaque
+stringData:
+  # A Cloudflare API token scoped to Zone:DNS:Edit for your domain(s) -
+  # never commit the real value, fill this in locally or via your secret
+  # manager and apply directly (this file is safe to keep as a template).
+  api-token: "your-cloudflare-api-token"
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: your-email@example.com # <-- change this
+    privateKeySecretRef:
+      name: letsencrypt-prod-account-key
+    solvers:
+      - dns01:
+          cloudflare:
+            apiTokenSecretRef:
+              name: cloudflare-api-token
+              key: api-token

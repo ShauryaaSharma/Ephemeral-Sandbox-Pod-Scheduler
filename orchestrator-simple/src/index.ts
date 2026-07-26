@@ -12,10 +12,19 @@ import { createStopper } from "./stop";
 import { startReaper, getRecentAutoTeardowns } from "./reaper";
 import { startHealthMonitor, getRecentAlerts } from "./healthMonitor";
 import { getPodResourceUsage } from "./monitor";
+import { ensureNamespace, deleteProjectNamespace } from "./namespace";
+import { withRetry, checkPodSchedulable, translateK8sError } from "./capacity";
+import { rateLimit } from "./rateLimit";
 
 const app = express();
 app.use(express.json());
 app.use(cors());
+
+// Config-driven instead of baked into the committed service.yaml template -
+// WS_DOMAIN also has to match what runner/frontend use to reach a pod (see
+// stop.ts/reaper.ts and the frontend's VITE_WS_DOMAIN).
+const WS_DOMAIN = process.env.WS_DOMAIN ?? "peetcode.com";
+const APP_DOMAIN = process.env.APP_DOMAIN ?? "autogpt-cloud.com";
 
 const kubeconfig = new KubeConfig();
 kubeconfig.loadFromDefault();
@@ -24,7 +33,7 @@ const appsV1Api = kubeconfig.makeApiClient(AppsV1Api);
 const networkingV1Api = kubeconfig.makeApiClient(NetworkingV1Api);
 const metricsClient = new Metrics(kubeconfig);
 
-const stopProject = createStopper({ appsV1Api, coreV1Api, networkingV1Api });
+const stopProject = createStopper({ coreV1Api });
 startReaper(stopProject);
 startHealthMonitor(coreV1Api);
 
@@ -43,9 +52,8 @@ const readAndParseKubeYaml = (filePath: string, substitutions: Record<string, st
     return docs;
 };
 
-app.post("/start", requireAuth, async (req, res) => {
+app.post("/start", requireAuth, rateLimit, async (req, res) => {
     const { replId } = req.body;
-    const namespace = "default"; // Assuming a default namespace, adjust as needed
 
     if (!replId) {
         res.status(400).send({ message: "Bad request" });
@@ -63,33 +71,55 @@ app.post("/start", requireAuth, async (req, res) => {
     }
 
     try {
+        const namespace = await ensureNamespace(coreV1Api, replId);
         const kubeManifests = readAndParseKubeYaml(path.join(__dirname, "../service.yaml"), {
             service_name: replId,
             owner_id_placeholder: project.ownerId,
+            ws_domain_placeholder: WS_DOMAIN,
+            app_domain_placeholder: APP_DOMAIN,
         });
         for (const manifest of kubeManifests) {
             switch (manifest.kind) {
                 case "Deployment":
-                    await appsV1Api.createNamespacedDeployment(namespace, manifest);
+                    await withRetry(() => appsV1Api.createNamespacedDeployment(namespace, manifest));
                     break;
                 case "Service":
-                    await coreV1Api.createNamespacedService(namespace, manifest);
+                    await withRetry(() => coreV1Api.createNamespacedService(namespace, manifest));
                     break;
                 case "Ingress":
-                    await networkingV1Api.createNamespacedIngress(namespace, manifest);
+                    await withRetry(() => networkingV1Api.createNamespacedIngress(namespace, manifest));
                     break;
                 case "NetworkPolicy":
-                    await networkingV1Api.createNamespacedNetworkPolicy(namespace, manifest);
+                    await withRetry(() => networkingV1Api.createNamespacedNetworkPolicy(namespace, manifest));
                     break;
                 default:
                     console.log(`Unsupported kind: ${manifest.kind}`);
             }
         }
+
+        // Kubernetes accepts the Deployment regardless of whether any node
+        // can actually run it - check for that before reporting success, so
+        // we don't tell the user their pod started when it never will.
+        const schedulability = await checkPodSchedulable(coreV1Api, replId);
+        if (!schedulability.schedulable) {
+            console.warn(`[start] ${replId} is unschedulable (${schedulability.reason}), rolling back`);
+            await deleteProjectNamespace(coreV1Api, replId).catch((err) =>
+                console.error(`[start] failed to roll back namespace for ${replId}`, err)
+            );
+            res.status(503)
+                .set("Retry-After", "30")
+                .send({
+                    message: `Cluster doesn't have capacity for this project right now (${schedulability.reason}). Please try again shortly.`,
+                });
+            return;
+        }
+
         markStarted(replId);
         res.status(200).send({ message: "Resources created successfully" });
     } catch (error) {
         console.error("Failed to create resources", error);
-        res.status(500).send({ message: "Failed to create resources" });
+        const { status, message } = translateK8sError(error);
+        res.status(status).send({ message });
     }
 });
 

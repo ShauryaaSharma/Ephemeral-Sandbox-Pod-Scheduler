@@ -103,10 +103,20 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: service_name
+  # annotations:
+  #   Uncomment once TLS is set up (see README "TLS via cert-manager") to
+  #   force HTTP -> HTTPS. Leave commented out until then, or this breaks
+  #   plain-HTTP access before a certificate actually exists.
+  #   nginx.ingress.kubernetes.io/ssl-redirect: "true"
 spec:
   ingressClassName: nginx
+  # No tls: block needed here - TLS for every project's subdomain is served
+  # via the ingress controller's cluster-wide default certificate (see
+  # k8s/ingress-controller.yaml and README "TLS via cert-manager"), not a
+  # per-project certificate. This avoids issuing (and rate-limiting against)
+  # a brand new Let's Encrypt cert every time a project starts.
   rules:
-  - host: service_name.peetcode.com
+  - host: service_name.ws_domain_placeholder
     http:
       paths:
       - path: /
@@ -116,7 +126,7 @@ spec:
             name: service_name
             port:
               number: 3001
-  - host: service_name.autogpt-cloud.com
+  - host: service_name.app_domain_placeholder
     http:
       paths:
       - path: /
