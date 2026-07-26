@@ -1,0 +1,56 @@
+.security {
+  padding: 110px 24px;
+  background:
+    radial-gradient(ellipse 55% 40% at 12% 10%, rgba(52, 211, 153, 0.06), transparent),
+    radial-gradient(ellipse 50% 35% at 90% 90%, rgba(255, 138, 0, 0.05), transparent);
+}
+
+.security-inner {
+  max-width: 1180px;
+  margin: 0 auto;
+}
+
+.security-grid {
+  margin-top: 64px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 22px;
+}
+
+.security-card {
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: var(--surface);
+  padding: 30px 28px;
+  transition: border-color 0.3s ease;
+}
+
+.security-card:hover {
+  border-color: var(--m-color);
+}
+
+.security-card-icon {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  font-size: 1.3rem;
+  color: var(--m-color);
+  background: color-mix(in srgb, var(--m-color) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--m-color) 30%, transparent);
+  margin-bottom: 20px;
+}
+
+.security-card h3 {
+  font-size: 1.12rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  margin-bottom: 12px;
+}
+
+.security-card p {
+  color: var(--muted);
+  font-size: 0.92rem;
+  line-height: 1.7;
+}
