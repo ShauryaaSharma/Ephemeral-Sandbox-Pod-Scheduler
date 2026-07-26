@@ -4,10 +4,10 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import styled from '@emotion/styled';
 import { authHeaders } from '../lib/auth';
+import { INIT_SERVICE_URL } from '../lib/config';
 
 /** Constants */
 const SLUG_WORKS = ["car", "dog", "computer", "person", "inside", "word", "for", "please", "to", "cool", "open", "source"];
-const SERVICE_URL = "http://localhost:3001";
 
 /** Styled components */
 const Container = styled.div`
@@ -83,7 +83,7 @@ export const Landing = () => {
         <StyledButton disabled={loading} onClick={async () => {
           setLoading(true);
           const headers = await authHeaders();
-          await axios.post(`${SERVICE_URL}/project`, { replId, language }, { headers });
+          await axios.post(`${INIT_SERVICE_URL}/project`, { replId, language }, { headers });
           setLoading(false);
           navigate(`/coding/?replId=${replId}`)
         }}>{loading ? "Starting ..." : "Start Coding"}</StyledButton>

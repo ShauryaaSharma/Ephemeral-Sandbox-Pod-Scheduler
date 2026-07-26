@@ -5,7 +5,12 @@ import path from "path";
 const s3 = new S3({
     accessKeyId: process.env.AWS_ACCESS_KEY_ID,
     secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-    endpoint: process.env.S3_ENDPOINT
+    endpoint: process.env.S3_ENDPOINT,
+    // Required for any S3-compatible endpoint that isn't AWS itself (R2,
+    // MinIO, etc.) - without this the SDK defaults to virtual-hosted-style
+    // addressing (`<bucket>.<endpoint>`), which just fails to resolve
+    // against a custom endpoint. Harmless no-op against real AWS S3.
+    s3ForcePathStyle: true,
 })
 
 export async function copyS3Folder(sourcePrefix: string, destinationPrefix: string, continuationToken?: string): Promise<void> {
@@ -44,7 +49,12 @@ export async function copyS3Folder(sourcePrefix: string, destinationPrefix: stri
             await copyS3Folder(sourcePrefix, destinationPrefix, continuationToken);
         }
     } catch (error) {
+        // Must rethrow: swallowing this here meant POST /project reported
+        // "Project created" even when the copy failed completely (found by
+        // actually hitting a real, unreachable-config S3 endpoint) - the
+        // caller needs to know this failed, not just see it logged.
         console.error('Error copying folder:', error);
+        throw error;
     }
 }
 

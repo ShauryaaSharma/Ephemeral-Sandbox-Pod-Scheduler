@@ -66,6 +66,7 @@ init-service/
     auth.ts      # JWT sign/verify + requireAuth middleware
     db.ts        # SQLite ownership store (replId -> ownerId)
     rateLimit.ts # per-user token-bucket limiter on POST /project
+  Dockerfile     # builds init-service for deployment (see "Deploying the schedulers")
 
 orchestrator-simple/
   src/
@@ -80,6 +81,7 @@ orchestrator-simple/
     capacity.ts      # retry-with-backoff + Unschedulable-pod detection + error translation
     rateLimit.ts     # per-user token-bucket limiter on POST /start
   service.yaml   # parameterized manifest template (service_name / owner_id_placeholder / ws_domain_placeholder / app_domain_placeholder)
+  Dockerfile     # builds orchestrator-simple for deployment (see "Deploying the schedulers")
 
 runner/
   src/
@@ -97,6 +99,7 @@ frontend/
   src/
     lib/
       auth.ts        # bootstraps/caches the anonymous session token
+      config.ts       # every deployment-configurable backend address (init-service, orchestrator, TLS)
     components/
       Landing.tsx     # create a project (calls init-service)
       CodingPage.tsx  # calls orchestrator /start, waits for pod, polls per-project health
@@ -106,6 +109,8 @@ k8s/
   ingress-controller.yaml   # nginx-ingress-controller cluster setup
   create-secret.sh          # creates the sandbox-secrets k8s Secret from your shell env
   cluster-issuer.yaml       # cert-manager Let's Encrypt ClusterIssuer (DNS01)
+  rbac.yaml                 # ServiceAccount/ClusterRole/ClusterRoleBinding for in-cluster orchestrator-simple
+  scheduler-services.yaml   # optional: Deployments/Services/Ingress to run init-service + orchestrator-simple in-cluster
   wildcard-certificate.yaml # one wildcard cert covering both project domains
 ```
 
@@ -215,6 +220,8 @@ Everything above runs over plain HTTP. To serve `<replId>.<domain>` over HTTPS, 
 | `ALERT_WEBHOOK_URL` | orchestrator-simple | Optional Slack-compatible webhook (`{text: "..."}`) fired when a project starts crash-looping. Unset = no alerting. |
 | `RATE_LIMIT_MAX` / `RATE_LIMIT_WINDOW_SECONDS` | init-service, orchestrator-simple | Per-user token-bucket rate limit on `POST /project` / `POST /start` - burst size (default `5`) and refill window in seconds (default `60`). See [Rate limiting](#rate-limiting). |
 | `VITE_WS_DOMAIN` / `VITE_APP_DOMAIN` | frontend | Must match `WS_DOMAIN`/`APP_DOMAIN` above. Only need a `.env` at all if your domains differ from the defaults. |
+| `VITE_INIT_SERVICE_URL` / `VITE_ORCHESTRATOR_URL` | frontend | Full base URLs (protocol+host+port) for init-service/orchestrator-simple, wherever you deploy them. Defaults (`http://localhost:3001`/`:3002`) only work when running everything on one machine - **required** for any real deployment, since the frontend runs in the user's browser, not on your server. |
+| `VITE_USE_TLS` | frontend | Set to `"true"` once [TLS via cert-manager](#tls-via-cert-manager) is set up - switches the per-project socket/iframe connections from `ws`/`http` to `wss`/`https`. Default `false`. |
 
 `orchestrator-simple` authenticates to Kubernetes via `KubeConfig().loadFromDefault()` — it needs a valid kubeconfig (or in-cluster service account) available in its own environment, not an env var. See the RBAC note in [setup step 2](#2-configure-the-manifest-template) - namespace-per-project means this now needs cluster-scoped permissions, not just access to `default`.
 
@@ -303,6 +310,12 @@ Kubernetes accepts a Deployment even when no node can ever schedule its pod - th
 
 The two hostnames every project is reachable at are no longer hardcoded into the committed `service.yaml` - `service.yaml` now contains `ws_domain_placeholder`/`app_domain_placeholder` tokens, substituted at `/start` time from orchestrator-simple's `WS_DOMAIN`/`APP_DOMAIN` env vars (same mechanism as `service_name`). The frontend needs the matching `VITE_WS_DOMAIN`/`VITE_APP_DOMAIN` build-time env vars (only required if you're not using the `peetcode.com`/`autogpt-cloud.com` defaults) - see `frontend/.env.example`.
 
+All frontend-side backend addresses now live in one place, `frontend/src/lib/config.ts`:
+- `VITE_INIT_SERVICE_URL` / `VITE_ORCHESTRATOR_URL` - full base URLs for init-service/orchestrator-simple. These are **not** subdomains of anything, unlike the per-project hosts - they're two ordinary services you host wherever you like, so the defaults (`http://localhost:3001`/`:3002`) only work when everything runs on one machine. **This is the one env var pair you must set for any deployment that isn't local dev** - without it, every browser that loads the deployed frontend tries to reach its own `localhost`, which has nothing listening on it.
+- `VITE_USE_TLS` - a single flag switching the per-project socket (`ws`/`wss`) and iframe (`http`/`https`) connections together, since both project domains share one wildcard cert (see [TLS via cert-manager](#tls-via-cert-manager)). Enabling TLS backend-side does nothing for the browser until this is also set.
+
+Verified in a real dev-server session (not just by reading the code): with no `.env`, the auth-bootstrap request correctly targeted `http://localhost:3001`; after setting a `.env` with distinct custom values for `VITE_INIT_SERVICE_URL`/`VITE_ORCHESTRATOR_URL` and restarting Vite, inspecting the actual transformed module in the browser confirmed both constants resolved to the overridden values.
+
 ## TLS via cert-manager
 
 By default everything in this repo runs over plain HTTP. Enabling HTTPS for every `<replId>.<domain>` subdomain deliberately does **not** mean issuing a new Let's Encrypt certificate per project - Let's Encrypt rate-limits certificates per registered domain per week, and this architecture can create and destroy projects (and their subdomains) far faster than that. Instead:
@@ -316,10 +329,64 @@ That's the whole mechanism: every project's Ingress deliberately has **no** `tls
 
 **Why this is commented out / opt-in by default**: uncommenting `--default-ssl-certificate` before the referenced secret exists makes the ingress controller pod fail to start entirely - not just break TLS, break HTTP too. Leaving it commented keeps the base HTTP-only setup working for anyone who hasn't done the cert-manager steps yet.
 
+## Deploying the schedulers
+
+Everything above assumes `init-service` and `orchestrator-simple` are just running via `npm run dev` somewhere - that's still completely valid (a VM, a plain Docker host, anywhere with network access to your cluster's API server), and the two `Dockerfile`s below are all you need for that path. This section is for running them **inside** the same cluster they manage, which is the more self-contained option.
+
+Both Dockerfiles were actually built and run (Docker was available in this environment) rather than just written and assumed correct, which caught two real, pre-existing bugs neither of which had anything to do with the Dockerfiles themselves:
+- **No `.dockerignore` anywhere in the repo** (all three services). Without one, `COPY . .` copies the *host's* `node_modules` into the image, silently overwriting the correctly-Linux-compiled native `better-sqlite3` binary that `npm install` had just built *inside* the container - the container crashed on startup with `invalid ELF header`. Added `.dockerignore` (excluding `node_modules`, `dist`, `.env`) to all three services - this bug was equally latent in `runner`'s Dockerfile, just never triggered.
+- **`orchestrator-simple/tsconfig.json` never had `outDir`/`rootDir` set** (unlike `init-service`'s otherwise-identical config), so `tsc -b` compiled every `.ts` file to a `.js` file *next to it inside `src/`* instead of into `dist/` - meaning `node dist/index.js` (this Dockerfile's `CMD`, and `npm run start`) has never actually worked for orchestrator-simple, going back before any of the work in this README's changelog. Fixed by setting `rootDir: "./src"` / `outDir: "./dist"` to match `init-service`.
+
+After both fixes, each image was built, run, and hit with real HTTP requests: `init-service`'s container correctly issued a signed JWT from `POST /auth/session`; `orchestrator-simple`'s container started its reaper and health-monitor background loops and correctly returned `401` on unauthenticated `/status` and `/start` calls.
+
+### 1. Build and push both images
+
+```bash
+cd init-service && docker build -t <your-registry>/init-service:latest . && docker push <your-registry>/init-service:latest && cd ..
+cd orchestrator-simple && docker build -t <your-registry>/orchestrator-simple:latest . && docker push <your-registry>/orchestrator-simple:latest && cd ..
+```
+
+### 2. Grant orchestrator-simple in-cluster permissions
+
+```bash
+kubectl apply -f k8s/rbac.yaml
+```
+
+This creates a `sandbox-orchestrator` ServiceAccount + `ClusterRole` + `ClusterRoleBinding` covering exactly what orchestrator-simple needs: create/delete `namespaces` (see [Namespace isolation](#namespace-isolation)), create/delete Deployments/Services/Ingresses/NetworkPolicies inside them, read-only `pods` (crash-loop detection) and `metrics.k8s.io` (resource usage). `@kubernetes/client-node`'s `loadFromDefault()` picks this ServiceAccount's mounted token up automatically once the Deployment below references it - no kubeconfig file, no extra env var.
+
+### 3. Apply the Secret, config, storage, and Deployments
+
+```bash
+./k8s/create-secret.sh   # if you haven't already (see step 3 of the main setup)
+kubectl apply -f k8s/scheduler-services.yaml
+```
+
+Edit the image references, `S3_BUCKET`/`S3_ENDPOINT`/`WS_DOMAIN`/`APP_DOMAIN` in the `ConfigMap`, and the two `host:` values in the `Ingress` before applying - same pattern as `service.yaml`, just edited directly since this file is applied once, not templated per-project.
+
+**Storage note**: init-service and orchestrator-simple share the SQLite ownership file (see the trade-off note under [Auth & ownership](#auth--ownership)) via a single `PersistentVolumeClaim` mounted `ReadWriteMany` into both pods. **Not every cluster supports RWX out of the box** - AWS EBS, GCE PD, and Azure Disk are all `ReadWriteOnce`-only; you need something like EFS/Filestore/Azure Files/NFS/Longhorn. If that's not available to you, the fallback is running both containers in one Pod sharing a plain `emptyDir` instead of a PVC - works everywhere, at the cost of coupling their restarts/scaling together (a straightforward adaptation of the manifest, not provided as a separate file here).
+
+**Networking note**: `init.<WS_DOMAIN>` and `api.<WS_DOMAIN>` are ordinary single-level subdomains, so if you've done the [TLS setup](#tls-via-cert-manager) they're already covered by the same wildcard certificate - no extra cert-manager work.
+
+### 4. Point the frontend at them
+
+```
+VITE_INIT_SERVICE_URL=http://init.peetcode.com
+VITE_ORCHESTRATOR_URL=http://api.peetcode.com
+```
+
+(`https://` once TLS is enabled - see [`VITE_USE_TLS`](#environment-variables)).
+
+### Trade-off: orchestrator-simple's own outbound calls and hairpin NAT
+
+`/stop`'s final-sync call and the idle reaper's health checks (`stop.ts`/`reaper.ts`) reach a runner pod via its **public** ingress hostname (`http://<replId>.<WS_DOMAIN>/shutdown`) - orchestrator-simple has no other network path to it today. That's harmless when orchestrator-simple runs outside the cluster (normal internet routing), but once it runs *inside* the same cluster, that request has to leave the cluster via the ingress controller's external IP/LoadBalancer and route back in - "hairpin NAT" - which not every cloud provider or bare-metal LoadBalancer setup supports cleanly. Where it doesn't work, every `/stop` call's final sync and every reaper health check will time out (harmlessly - both paths are already bounded and fail gracefully - but the graceful-shutdown and idle-detection features effectively stop doing anything useful).
+
+**Not fixed here** - the correct fix is having orchestrator-simple reach runner pods via in-cluster Service DNS (`http://<replId>.sandbox-<replId>.svc.cluster.local:3001`) instead of the public hostname when it's running in-cluster, which also means extending the NetworkPolicy's ingress rule to allow orchestrator-simple's own namespace, not just `ingress-nginx`. That's a real architecture change to the request path (not just a deployment manifest), so it wasn't made unilaterally - flagging it clearly here instead. If you deploy orchestrator-simple in-cluster and rely on `/stop`'s final sync or the idle reaper, test whether hairpin NAT works on your cluster first.
+
 ## Known limitations
 
 - **Auth is anonymous/device-bound, not a real identity system** - see [Auth & ownership](#auth--ownership). Good enough to stop strangers from hijacking a `replId` they don't own; not a substitute for real accounts.
-- **init-service and orchestrator-simple must share a filesystem** for the SQLite ownership store today (see the trade-off note under [Auth & ownership](#auth--ownership)).
+- **init-service and orchestrator-simple must share a filesystem** for the SQLite ownership store today (see the trade-off note under [Auth & ownership](#auth--ownership)) - a shared volume (a `ReadWriteMany` PVC in-cluster, see [Deploying the schedulers](#deploying-the-schedulers)) satisfies this, but not every cluster has RWX storage available.
+- **orchestrator-simple's own outbound calls (final sync, health checks) go through the public ingress**, which can hit hairpin-NAT issues once it runs inside the same cluster it manages - see the trade-off note in [Deploying the schedulers](#deploying-the-schedulers). Not an issue when it runs outside the cluster (the default assumption everywhere else in this README).
 - **No frontend "Stop" button.** `POST /stop` exists and is fully wired up, but nothing in the UI calls it yet - today it's reachable but not user-facing.
 - **No pod pre-warming.** Cold starts pay the full init-container S3 copy + image pull cost every time; this was explicitly deferred as a stretch goal (see [Lifecycle](#lifecycle-stop-graceful-shutdown-idle-timeout)).
 - **Resource usage monitoring requires `metrics-server`.** Without it, CPU/memory numbers in `/status` are always `null` (fails closed, doesn't break anything else) - the static `resources.limits` in the manifest are still enforced by Kubernetes itself either way, this only affects the *visibility* into usage.
@@ -410,6 +477,32 @@ All four backend/frontend surfaces type-check cleanly; the frontend banner addit
 
 Frontend, init-service, and orchestrator-simple all changed in these two tiers; runner was untouched (P5/P6 are entirely about the scheduling/networking layer, not the per-pod runtime).
 
+### Frontend deployment wiring (follow-up, 2026-07-26)
+
+After the six priority tiers above, a review of "is this actually deployable" turned up that the frontend still hardcoded `http://localhost:3001`/`:3002` for init-service/orchestrator-simple in three places (`lib/auth.ts`, `Landing.tsx`, `CodingPage.tsx`), and hardcoded `ws://`/`http://` (never `wss`/`https`) for the per-project connections - meaning the TLS work in Priority 6 had no effect on actual browser traffic. Fixed by centralizing every backend address into `frontend/src/lib/config.ts` (`VITE_INIT_SERVICE_URL`, `VITE_ORCHESTRATOR_URL`, `VITE_USE_TLS`, alongside the existing `VITE_WS_DOMAIN`/`VITE_APP_DOMAIN`). Verified in a live dev-server session, not just by reading the code - see [Configurable domains](#configurable-domains) for what was actually checked.
+
+### Scheduler deployment packaging (follow-up, 2026-07-26)
+
+The same deployability review flagged three remaining gaps: no `Dockerfile`/deployment manifest for `init-service` or `orchestrator-simple` themselves (only the runner image they deploy per-project was containerized), no RBAC for running `orchestrator-simple` in-cluster with least privilege, and the shared-SQLite-file constraint had no concrete deployment story. All three addressed - see [Deploying the schedulers](#deploying-the-schedulers) for the full detail:
+- `Dockerfile`s for both services (mirroring the runner's pattern).
+- `k8s/rbac.yaml` - a `ServiceAccount`/`ClusterRole`/`ClusterRoleBinding` scoped to exactly what orchestrator-simple needs, so it can run with an in-cluster identity instead of a mounted admin kubeconfig.
+- `k8s/scheduler-services.yaml` - `ConfigMap` + `ReadWriteMany` `PersistentVolumeClaim` (for the shared ownership DB) + `Deployment`/`Service` for each + an `Ingress` exposing both, reusing the existing wildcard certificate.
+- Documented, not fixed: a hairpin-NAT risk in orchestrator-simple's own outbound calls once it runs in-cluster (see the trade-off note in that section) - a real architecture change to the request path, flagged rather than made unilaterally.
+- **Incidental cleanup**: `orchestrator-simple/src/aws.ts` and its S3/AWS env vars were dead code - never imported anywhere, presumably copy-pasted from init-service's template originally. Removed, along with the now-unused `aws-sdk` dependency.
+- **Two real, pre-existing bugs found and fixed by actually building and running both Docker images** (detailed in [Deploying the schedulers](#deploying-the-schedulers)): a missing `.dockerignore` that let the host's Windows-compiled `node_modules` shadow the container's correctly Linux-compiled ones, and `orchestrator-simple/tsconfig.json` never having `outDir`/`rootDir` set, meaning its production build (`dist/index.js`) had never actually worked. Both were verified fixed by rebuilding, running each container, and hitting it with real HTTP requests.
+
+### Unhandled-rejection crash bug across all three backend services (follow-up, 2026-07-26)
+
+Verifying the runner image with a real `socket.io-client` connection (not just an HTTP curl) - the only way to actually exercise the terminal/editor path - crashed the whole container the moment a real client connected: an unguarded `await fetchDir("/workspace", "")` in `ws.ts`'s connection handler rejected (nothing had populated `/workspace` in the test container), and since **Node terminates the process on an unhandled promise rejection by default**, that took down the entire pod - every session in it, not just the one bad connection.
+
+Auditing for the same pattern found it was systemic, not a one-off:
+- **`runner/src/ws.ts`**: every single async socket handler (`fetchDir`, `fetchContent`, `updateContent`, `requestTerminal`, `terminalData`, plus the connection handler's initial workspace load) was unguarded. All now wrapped in `try`/`catch`, logging and degrading gracefully (empty results, or just logging for fire-and-forget events) instead of crashing.
+- **`init-service/src/index.ts`**: `POST /project`'s `await copyS3Folder(...)` had no try/catch - a real, live risk (any S3 error - bad credentials, network blip, unknown language folder - would have crashed the process for every user, not just the failing request). Fixed.
+- **`orchestrator-simple/src/index.ts`**: `GET /status`'s `Promise.all` had no try/catch. `getPodResourceUsage` already catches internally today so this wasn't currently reachable, but the endpoint shouldn't depend on that never changing - a status dashboard failing should 500, not take `/start`, `/stop`, the reaper, and the health monitor down with it. Fixed.
+- **Defense in depth**: added a top-level `process.on("unhandledRejection", ...)` handler (log, don't crash) to all three services, as a last line of defense against the *next* unguarded async call, rather than relying on every handler being audited correctly forever.
+
+**Verified by reproducing the exact crash and confirming the fix**: the same `socket.io-client` connection that killed the container before now completes the handshake, receives a graceful empty `loaded` event, and the container stays running afterward - confirmed across multiple restarts. `node-pty`'s native binary was also confirmed functional in the process (it reached an actual `chdir` syscall attempt, not a module-load failure) - it only failed because `/workspace` doesn't exist in this ad hoc test container, which is expected outside a real pod and unrelated to the crash bug.
+
 ## What's real vs. aspirational
 
 A honest tally across all six priority tiers, since the brief specifically asked for this:
@@ -428,6 +521,9 @@ A honest tally across all six priority tiers, since the brief specifically asked
 - Per-user rate limiting on `/project` and `/start`
 - Namespace-per-project isolation (the Priority 5 stretch goal)
 - Configurable domains, TLS via a shared wildcard cert + cert-manager
+- Frontend deployment config (`lib/config.ts`) - no more hardcoded `localhost` backends, verified live in a dev-server session
+- Full deployment packaging for `init-service`/`orchestrator-simple`: `Dockerfile`s, RBAC, shared-storage manifest, `Ingress` - both images actually built and run in this environment, catching two real pre-existing bugs (missing `.dockerignore`, orchestrator-simple's broken `dist/` build) that would otherwise have surfaced as a confusing production-only failure
+- A systemic unhandled-rejection crash bug across all three backend services, found by actually connecting a real `socket.io-client` to the runner container instead of just curling HTTP endpoints - fixed everywhere it was found, plus a top-level safety net added to all three services against the next unguarded async call
 
 **Explicitly deferred, with reasoning documented inline**:
 - **Pod pre-warming** (Priority 3's stretch goal) - warm-pool management (claim/release, relabeling, a pre-creation loop against an empty workspace) is a meaningfully larger subsystem than anything else in this list; deferred until 1-3 were solid, per the brief's own instruction, and never circled back to given the scope already covered.

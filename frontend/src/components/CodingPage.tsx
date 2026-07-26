@@ -8,8 +8,7 @@ import { Output } from './Output';
 import { TerminalComponent as Terminal } from './Terminal';
 import axios from 'axios';
 import { authHeaders, getAuthToken } from '../lib/auth';
-
-const WS_DOMAIN = import.meta.env.VITE_WS_DOMAIN ?? 'peetcode.com';
+import { ORCHESTRATOR_URL, socketUrl } from '../lib/config';
 
 interface ProjectHealth {
     healthStatus: 'unknown' | 'healthy' | 'unhealthy';
@@ -32,7 +31,7 @@ function useProjectHealth(replId: string): ProjectHealth | null {
         const poll = async () => {
             try {
                 const headers = await authHeaders();
-                const { data } = await axios.get(`http://localhost:3002/projects/${replId}/status`, { headers });
+                const { data } = await axios.get(`${ORCHESTRATOR_URL}/projects/${replId}/status`, { headers });
                 if (!cancelled) setHealth(data);
             } catch (err) {
                 console.error('failed to poll project health', err);
@@ -66,7 +65,7 @@ function useSocket(replId: string) {
 
         getAuthToken().then((token) => {
             if (cancelled) return;
-            createdSocket = io(`ws://${replId}.${WS_DOMAIN}`, { auth: { token } });
+            createdSocket = io(socketUrl(replId), { auth: { token } });
             setSocket(createdSocket);
         });
 
@@ -117,7 +116,7 @@ export const CodingPage = () => {
     useEffect(() => {
         if (replId) {
             authHeaders()
-                .then((headers) => axios.post(`http://localhost:3002/start`, { replId }, { headers }))
+                .then((headers) => axios.post(`${ORCHESTRATOR_URL}/start`, { replId }, { headers }))
                 .then(() => setPodCreated(true))
                 .catch((err) => console.error(err));
         }

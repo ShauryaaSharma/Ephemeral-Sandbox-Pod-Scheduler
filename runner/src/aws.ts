@@ -5,7 +5,12 @@ import path from "path";
 const s3 = new S3({
     accessKeyId: process.env.AWS_ACCESS_KEY_ID,
     secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-    endpoint: process.env.S3_ENDPOINT
+    endpoint: process.env.S3_ENDPOINT,
+    // Required for any S3-compatible endpoint that isn't AWS itself (R2,
+    // MinIO, etc.) - without this the SDK defaults to virtual-hosted-style
+    // addressing (`<bucket>.<endpoint>`), which just fails to resolve
+    // against a custom endpoint. Harmless no-op against real AWS S3.
+    s3ForcePathStyle: true,
 })
 export const fetchS3Folder = async (key: string, localPath: string): Promise<void> => {
     const params = {

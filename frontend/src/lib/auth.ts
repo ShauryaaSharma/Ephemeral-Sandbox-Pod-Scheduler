@@ -1,7 +1,7 @@
 import axios from "axios";
+import { INIT_SERVICE_URL } from "./config";
 
 const TOKEN_KEY = "sandbox_auth_token";
-const INIT_SERVICE_URL = "http://localhost:3001";
 
 let pendingSession: Promise<string> | null = null;
 

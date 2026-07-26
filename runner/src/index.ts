@@ -7,6 +7,17 @@ import cors from "cors";
 import { autoRunProject } from "./autorun";
 import { syncWorkspaceToS3, withTimeout } from "./sync";
 
+// Node terminates the process on an unhandled promise rejection by default -
+// found the hard way (an unguarded fetchDir() call in ws.ts crashed the
+// entire pod, killing every session in it, the moment /workspace had any
+// issue). Every known async socket handler is now wrapped in try/catch, but
+// this is the last line of defense against the next one that isn't: log and
+// keep the pod running rather than take down every other session over one
+// bad request.
+process.on("unhandledRejection", (reason) => {
+  console.error("[unhandledRejection] swallowed to avoid crashing the pod:", reason);
+});
+
 const app = express();
 app.use(cors());
 app.use(express.json());

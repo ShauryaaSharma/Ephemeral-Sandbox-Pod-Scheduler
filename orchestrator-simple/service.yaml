@@ -22,8 +22,13 @@ spec:
           image: amazon/aws-cli
           command: ["/bin/sh", "-c"]
           args:
+            # --endpoint-url is conditional (${S3_ENDPOINT:+...}) so this
+            # still works unmodified against real AWS S3 (leave S3_ENDPOINT
+            # blank below) as well as R2/MinIO/any S3-compatible endpoint -
+            # found by actually testing against MinIO, where this container
+            # would otherwise have tried to reach real AWS and failed.
             - >
-              aws s3 cp s3://repl/code/service_name/ /workspace/ --recursive &&
+              aws s3 cp s3://your-bucket-name/code/service_name/ /workspace/ --recursive ${S3_ENDPOINT:+--endpoint-url "$S3_ENDPOINT"} &&
               echo "Resources copied from S3";
           env:
             - name: AWS_ACCESS_KEY_ID
@@ -36,6 +41,8 @@ spec:
                 secretKeyRef:
                   name: sandbox-secrets
                   key: AWS_SECRET_ACCESS_KEY
+            - name: S3_ENDPOINT
+              value: "your-s3-endpoint" # leave blank for real AWS S3; set for R2/MinIO/etc - must match the runner container's S3_ENDPOINT below
           volumeMounts:
             - name: workspace-volume
               mountPath: /workspace

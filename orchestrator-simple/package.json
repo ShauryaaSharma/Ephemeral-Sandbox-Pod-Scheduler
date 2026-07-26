@@ -6,7 +6,6 @@
   "dependencies": {
     "@kubernetes/client-node": "^0.20.0",
     "@types/cors": "^2.8.17",
-    "aws-sdk": "^2.1556.0",
     "axios": "^1.6.7",
     "better-sqlite3": "^11.3.0",
     "cors": "^2.8.5",

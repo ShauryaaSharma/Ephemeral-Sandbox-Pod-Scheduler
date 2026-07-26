@@ -16,6 +16,16 @@ import { ensureNamespace, deleteProjectNamespace } from "./namespace";
 import { withRetry, checkPodSchedulable, translateK8sError } from "./capacity";
 import { rateLimit } from "./rateLimit";
 
+// Express 4 doesn't catch a rejected async route handler for you - an
+// unguarded await that throws becomes an unhandled rejection, which Node
+// terminates the whole process over by default. Every route below has its
+// own try/catch, but this is the last line of defense against the next one
+// that doesn't - and this process crashing takes /start, /stop, the reaper,
+// and the health monitor down all at once, for every project, not just one.
+process.on("unhandledRejection", (reason) => {
+    console.error("[unhandledRejection] swallowed to avoid crashing the process:", reason);
+});
+
 const app = express();
 app.use(express.json());
 app.use(cors());
@@ -155,28 +165,37 @@ app.post("/stop", requireAuth, async (req, res) => {
 // Fine for a portfolio-scale deployment; a real multi-tenant deployment
 // would want this restricted to an admin role.
 app.get("/status", requireAuth, async (req, res) => {
-    const active = getStartedProjects();
-    const unhealthy = active.filter((p) => p.healthStatus === "unhealthy");
+    try {
+        const active = getStartedProjects();
+        const unhealthy = active.filter((p) => p.healthStatus === "unhealthy");
 
-    const projects = await Promise.all(
-        active.map(async (p) => ({
-            replId: p.replId,
-            ownerId: p.ownerId,
-            healthStatus: p.healthStatus,
-            restartCount: p.restartCount,
-            unhealthyReason: p.unhealthyReason,
-            lastActiveAt: p.lastActiveAt,
-            resourceUsage: await getPodResourceUsage(metricsClient, p.replId),
-        }))
-    );
+        const projects = await Promise.all(
+            active.map(async (p) => ({
+                replId: p.replId,
+                ownerId: p.ownerId,
+                healthStatus: p.healthStatus,
+                restartCount: p.restartCount,
+                unhealthyReason: p.unhealthyReason,
+                lastActiveAt: p.lastActiveAt,
+                resourceUsage: await getPodResourceUsage(metricsClient, p.replId),
+            }))
+        );
 
-    res.json({
-        totalActivePods: active.length,
-        unhealthyCount: unhealthy.length,
-        projects,
-        recentAutoTeardowns: getRecentAutoTeardowns(),
-        recentAlerts: getRecentAlerts(),
-    });
+        res.json({
+            totalActivePods: active.length,
+            unhealthyCount: unhealthy.length,
+            projects,
+            recentAutoTeardowns: getRecentAutoTeardowns(),
+            recentAlerts: getRecentAlerts(),
+        });
+    } catch (err) {
+        // getPodResourceUsage already catches internally today, but this
+        // endpoint shouldn't depend on that never changing - a status
+        // dashboard failing should return a 500, not take the whole
+        // scheduler down.
+        console.error("Failed to build /status response:", err);
+        res.status(500).send({ message: "Failed to build status" });
+    }
 });
 
 // Ownership-scoped single-project view, for the frontend to poll (e.g. to
