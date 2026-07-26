@@ -29,6 +29,8 @@ export default function Nav() {
 
         <div className="nav-links">
           <a href="#how">How it works</a>
+          <a href="#security">Security</a>
+          <a href="#system-design">System design</a>
           <a href="#stack">Stack</a>
           <span className="nav-badge">
             <span className="nav-badge-dot" />
