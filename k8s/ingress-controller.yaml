@@ -372,7 +372,13 @@ spec:
             - --validating-webhook=:8443
             - --validating-webhook-certificate=/usr/local/certificates/cert
             - --validating-webhook-key=/usr/local/certificates/key
-          securityContext: 
+            # Uncomment once you've applied k8s/cluster-issuer.yaml and
+            # k8s/wildcard-certificate.yaml (see README "TLS via cert-manager")
+            # and re-apply this file (kubectl apply -f k8s/ingress-controller.yaml).
+            # Leave commented out until the referenced secret actually exists -
+            # otherwise this controller pod fails to start.
+            # - --default-ssl-certificate=ingress-nginx/wildcard-tls
+          securityContext:
             runAsNonRoot: true
             runAsUser: 101
             allowPrivilegeEscalation: false

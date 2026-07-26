@@ -9,6 +9,8 @@ import { TerminalComponent as Terminal } from './Terminal';
 import axios from 'axios';
 import { authHeaders, getAuthToken } from '../lib/auth';
 
+const WS_DOMAIN = import.meta.env.VITE_WS_DOMAIN ?? 'peetcode.com';
+
 interface ProjectHealth {
     healthStatus: 'unknown' | 'healthy' | 'unhealthy';
     restartCount: number;
@@ -64,7 +66,7 @@ function useSocket(replId: string) {
 
         getAuthToken().then((token) => {
             if (cancelled) return;
-            createdSocket = io(`ws://${replId}.peetcode.com`, { auth: { token } });
+            createdSocket = io(`ws://${replId}.${WS_DOMAIN}`, { auth: { token } });
             setSocket(createdSocket);
         });
 

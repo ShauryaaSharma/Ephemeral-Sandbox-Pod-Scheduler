@@ -43,7 +43,7 @@ Frontend (Vite + React)
 ```
 
 - **One pod per project.** Each `replId` gets its own Deployment, Service, and Ingress. Real isolation (separate filesystem, CPU/memory requests+limits) instead of every user sharing one backend process.
-- **Subdomain-based routing, not path-based.** Two ingress hosts are wired per project (`<replId>.peetcode.com`, `<replId>.autogpt-cloud.com` in the sample manifest). Swap these for your own domain(s) in `service.yaml`.
+- **Subdomain-based routing, not path-based.** Two ingress hosts are wired per project (`<replId>.peetcode.com`, `<replId>.autogpt-cloud.com` by default). Config-driven via `WS_DOMAIN`/`APP_DOMAIN` - see [Configurable domains](#configurable-domains) - not edited into `service.yaml` directly.
 - **Storage is still the source of truth.** Pods are disposable; nothing written outside `/workspace` survives a pod restart, and `/workspace` itself is only ever seeded once, at pod startup, by the init container.
 
 ## Tech stack
@@ -65,6 +65,7 @@ init-service/
     aws.ts       # S3/R2 client + copy helpers
     auth.ts      # JWT sign/verify + requireAuth middleware
     db.ts        # SQLite ownership store (replId -> ownerId)
+    rateLimit.ts # per-user token-bucket limiter on POST /project
 
 orchestrator-simple/
   src/
@@ -75,7 +76,10 @@ orchestrator-simple/
     reaper.ts        # background loop: polls started projects' /health, auto-stops idle ones
     monitor.ts       # pod status (crash-loop/OOM) + resource usage via the k8s API/Metrics API
     healthMonitor.ts # background loop: marks projects unhealthy on crash-loop, fires alerts
-  service.yaml   # parameterized manifest template (service_name / owner_id_placeholder)
+    namespace.ts     # per-project namespace (sandbox-<replId>) create/delete helpers
+    capacity.ts      # retry-with-backoff + Unschedulable-pod detection + error translation
+    rateLimit.ts     # per-user token-bucket limiter on POST /start
+  service.yaml   # parameterized manifest template (service_name / owner_id_placeholder / ws_domain_placeholder / app_domain_placeholder)
 
 runner/
   src/
@@ -95,12 +99,14 @@ frontend/
       auth.ts        # bootstraps/caches the anonymous session token
     components/
       Landing.tsx     # create a project (calls init-service)
-      CodingPage.tsx  # calls orchestrator /start, waits for pod, then connects
+      CodingPage.tsx  # calls orchestrator /start, waits for pod, polls per-project health
       Output.tsx      # iframe at http://<replId>.<domain>
 
 k8s/
   ingress-controller.yaml   # nginx-ingress-controller cluster setup
   create-secret.sh          # creates the sandbox-secrets k8s Secret from your shell env
+  cluster-issuer.yaml       # cert-manager Let's Encrypt ClusterIssuer (DNS01)
+  wildcard-certificate.yaml # one wildcard cert covering both project domains
 ```
 
 ## Getting started
@@ -128,9 +134,12 @@ Update the `image:` field in `orchestrator-simple/service.yaml` to match.
 
 Edit `orchestrator-simple/service.yaml`:
 - set your registry image
-- replace the two `host:` values under the Ingress with your own domain(s)
 - replace the ingress-controller namespace label in the `NetworkPolicy` doc if yours isn't `ingress-nginx`, and fill in your cluster's pod/service CIDRs (see comments in the file, and [Network policy](#network-policy) below)
-- `S3_BUCKET` / `S3_ENDPOINT` on the `runner` container are literal placeholder values in the template — edit them directly, same as the image/hostnames above
+- `S3_BUCKET` / `S3_ENDPOINT` on the `runner` container are literal placeholder values in the template — edit them directly, same as the image above
+
+The Ingress hostnames are **not** edited directly anymore - `ws_domain_placeholder`/`app_domain_placeholder` are substituted at `/start` time from orchestrator-simple's `WS_DOMAIN`/`APP_DOMAIN` env vars (step 5), the same mechanism already used for `service_name`. This is what makes the domains config-driven instead of baked into the committed template - see [Configurable domains](#configurable-domains).
+
+**RBAC note**: since each project now gets its own namespace (see [Namespace isolation](#namespace-isolation)), the credentials `orchestrator-simple` runs with need **cluster-scoped** permissions - not just a Role in one namespace - to create/delete Namespaces and to create/delete Deployments/Services/Ingresses/NetworkPolicies inside them. A `kubectl` admin kubeconfig already has this; a locked-down in-cluster ServiceAccount needs a `ClusterRole`/`ClusterRoleBinding` covering `namespaces` (create, delete, get) plus the existing resource kinds at cluster scope.
 
 ### 3. Create the credentials Secret
 
@@ -155,17 +164,19 @@ kubectl apply -f k8s/ingress-controller.yaml
 
 `init-service` and `orchestrator-simple` both need the **same** `JWT_SECRET` (used to sign/verify anonymous session tokens) and the **same** `OWNERSHIP_DB_PATH` (a shared SQLite file recording which user owns which `replId` — see [Auth & ownership](#auth--ownership)).
 
+**Note the copy destination below**: `dotenv.config()` loads `.env` from the process's working directory (i.e. the service root when you run `npm run dev` from there), *not* from `src/`, even though the template lives at `src/.env.example`. Copying it to `src/.env` (an easy mistake - the original version of this README did exactly that) means none of these variables actually load.
+
 ```bash
 # init-service
 cd init-service
 npm install
-cp src/.env.example src/.env   # fill in S3_BUCKET, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, S3_ENDPOINT, JWT_SECRET, OWNERSHIP_DB_PATH
+cp src/.env.example .env   # fill in S3_BUCKET, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, S3_ENDPOINT, JWT_SECRET, OWNERSHIP_DB_PATH
 npm run dev                     # :3001
 
 # orchestrator-simple
 cd orchestrator-simple
 npm install
-cp src/.env.example src/.env   # same JWT_SECRET and OWNERSHIP_DB_PATH as init-service
+cp src/.env.example .env   # same JWT_SECRET and OWNERSHIP_DB_PATH as init-service
 npm run dev                     # :3002 — needs kubeconfig access to your cluster (loadFromDefault())
 ```
 
@@ -174,10 +185,15 @@ npm run dev                     # :3002 — needs kubeconfig access to your clus
 ```bash
 cd frontend
 npm install
+cp .env.example .env   # only needed if your domains aren't peetcode.com/autogpt-cloud.com
 npm run dev                     # :5173
 ```
 
 Create a project, open it, and the frontend will call `/start` and wait for its pod before connecting. On first load it also silently calls `POST /auth/session` on `init-service` and caches the returned token in `localStorage` — see [Auth & ownership](#auth--ownership).
+
+### 7. (Optional) Enable TLS
+
+Everything above runs over plain HTTP. To serve `<replId>.<domain>` over HTTPS, see [TLS via cert-manager](#tls-via-cert-manager) - it's a few extra one-time cluster steps, deliberately kept separate so the base setup above keeps working without them.
 
 ## Environment variables
 
@@ -191,14 +207,16 @@ Create a project, open it, and the frontend will call `/start` and wait for its 
 | `JWT_SECRET` | init-service, orchestrator-simple, runner | Shared HMAC secret for signing/verifying anonymous session tokens. **Must be identical across all three services.** Generate with e.g. `openssl rand -hex 32`. |
 | `OWNER_ID` | runner | The verified owner's user id, injected by the orchestrator at pod-creation time (from the ownership row it already checked in `POST /start`). The runner's socket handshake rejects any token whose `userId` doesn't match this. |
 | `OWNERSHIP_DB_PATH` | init-service, orchestrator-simple | Path to the shared SQLite file mapping `replId` → owning user. Defaults to `<repo root>/data/ownership.db`, which only works if both services run on the same host/volume - see the trade-off note below. |
-| `WS_DOMAIN` | orchestrator-simple | Must match the ws-facing Ingress host in `service.yaml` (`<replId>.<this>`, default `peetcode.com`). Used to reach a pod's `/shutdown` and `/health` through the public ingress - orchestrator-simple has no other network path to pods. |
+| `WS_DOMAIN` / `APP_DOMAIN` | orchestrator-simple | The two domains projects are reachable at - `<replId>.<WS_DOMAIN>` for the terminal/editor socket (default `peetcode.com`), `<replId>.<APP_DOMAIN>` for the user's running app (default `autogpt-cloud.com`). Substituted into `service.yaml`'s Ingress at `/start` time; `WS_DOMAIN` is also used directly to reach a pod's `/shutdown`/`/health`. See [Configurable domains](#configurable-domains). |
 | `IDLE_TIMEOUT_MINUTES` | orchestrator-simple | How long a project can sit idle before the reaper auto-stops it. Default `15`. |
 | `REAPER_INTERVAL_SECONDS` | orchestrator-simple | How often the idle-timeout reaper checks started projects. Default `60`. |
 | `HEALTH_CHECK_INTERVAL_SECONDS` | orchestrator-simple | How often the crash-loop health monitor checks started projects. Default `30`. |
 | `CRASH_RESTART_THRESHOLD` | orchestrator-simple | Restart count at which a pod is considered crash-looping, even without an explicit `CrashLoopBackOff` reason yet. Default `5`. |
 | `ALERT_WEBHOOK_URL` | orchestrator-simple | Optional Slack-compatible webhook (`{text: "..."}`) fired when a project starts crash-looping. Unset = no alerting. |
+| `RATE_LIMIT_MAX` / `RATE_LIMIT_WINDOW_SECONDS` | init-service, orchestrator-simple | Per-user token-bucket rate limit on `POST /project` / `POST /start` - burst size (default `5`) and refill window in seconds (default `60`). See [Rate limiting](#rate-limiting). |
+| `VITE_WS_DOMAIN` / `VITE_APP_DOMAIN` | frontend | Must match `WS_DOMAIN`/`APP_DOMAIN` above. Only need a `.env` at all if your domains differ from the defaults. |
 
-`orchestrator-simple` authenticates to Kubernetes via `KubeConfig().loadFromDefault()` — it needs a valid kubeconfig (or in-cluster service account) available in its own environment, not an env var.
+`orchestrator-simple` authenticates to Kubernetes via `KubeConfig().loadFromDefault()` — it needs a valid kubeconfig (or in-cluster service account) available in its own environment, not an env var. See the RBAC note in [setup step 2](#2-configure-the-manifest-template) - namespace-per-project means this now needs cluster-scoped permissions, not just access to `default`.
 
 ## Lifecycle: stop, graceful shutdown, idle timeout
 
@@ -256,6 +274,48 @@ Two things to check before relying on this:
 - **Your CNI must enforce `NetworkPolicy`.** Calico, Cilium, and Weave Net do; plain flannel does **not** - the objects get created but silently ignored. If you're on flannel, switch to Canal or a policy-enforcing CNI.
 - **The CIDR placeholders are generic kubeadm defaults** (`10.244.0.0/16` pod CIDR, `10.96.0.0/12` service CIDR) and will be wrong for many managed clusters (EKS/GKE/AKS/k3s all differ). Confirm yours (`kubectl cluster-info dump | grep -m1 cluster-cidr`, and check your provider's docs for the service CIDR) and edit `orchestrator-simple/service.yaml` before relying on this in production.
 
+## Namespace isolation
+
+Every project now gets its own Kubernetes namespace (`sandbox-<replId>`, `orchestrator-simple/src/namespace.ts`), not a shared `default` - real RBAC/quota/naming isolation to sit alongside the NetworkPolicy work above, and it simplifies teardown to a single `deleteNamespace` call instead of four separate resource deletes (`stop.ts`).
+
+- `POST /start` creates the namespace first (idempotent - a 409 "already exists" is treated as success, not an error, so retrying or restarting a previously-stopped project both just work).
+- `POST /stop` and the idle reaper delete the whole namespace, which cascades the Deployment/Service/Ingress/NetworkPolicy automatically.
+- The crash-loop health monitor and resource-usage checks look up pods in the project's own namespace, not `default`.
+- **Trade-off**: namespace deletion is asynchronous in Kubernetes (a `Terminating` phase with finalizers) - this repo's `deleteNamespace` call returning doesn't mean the namespace is actually gone yet. A rapid stop-then-immediately-restart of the *same* `replId` can hit a conflict creating the new namespace while the old one is still terminating. In practice this resolves itself within seconds to a couple minutes; there's no special handling for it here (a fixed retry-with-backoff on `ensureNamespace` would be the natural next step if this becomes a real pain point).
+- **RBAC trade-off**: see the note in [Getting started, step 2](#2-configure-the-manifest-template) - this needs cluster-scoped permissions now, not a namespace-scoped Role.
+
+## Cluster capacity & retries
+
+Kubernetes accepts a Deployment even when no node can ever schedule its pod - that failure only shows up later as the pod sitting in `Pending` with a `PodScheduled=False`/`Unschedulable` condition, not as a thrown error from the create call. `orchestrator-simple/src/capacity.ts` handles both halves of this:
+
+- **Retry-with-backoff** (`withRetry`) around each resource-create call, for transient apiserver errors (5xx) - up to 3 attempts with exponential backoff. A 4xx (bad request, conflict, quota exceeded) never gets retried, since retrying won't change the outcome.
+- **Schedulability check** (`checkPodSchedulable`): after creating resources, `/start` waits a few seconds and polls the new pod's status for that `Unschedulable` condition. If found, it rolls back (deletes the namespace) and returns a clear `503` with a `Retry-After` header instead of falsely reporting success on a pod that will never run. If the pod's still ambiguously `Pending` when the check window closes, it's treated as schedulable rather than false-positive a rollback - the crash-loop health monitor catches genuinely stuck pods later regardless.
+- **Clean error responses** (`translateK8sError`): raw Kubernetes API error bodies never reach the frontend - a 409 becomes "resources already exist," a quota-exceeded 403 becomes a 503 capacity message, everything else becomes a generic "unexpected cluster error."
+- **Trade-off**: the schedulability check adds a real, unavoidable ~4-8s of latency to every successful `/start` call (the fixed delay before the scheduler could plausibly have reacted, plus a bounded poll window). A **queued-start pattern** (accept the request immediately, poll asynchronously, let the frontend poll a status endpoint) would avoid blocking the request but is meaningfully more infrastructure - a queue, a worker, client-side polling for "still starting" - and wasn't pursued given this is explicitly a lighter alternative the brief called out.
+
+## Rate limiting
+
+`POST /project` (init-service) and `POST /start` (orchestrator-simple) are both rate-limited per authenticated **user** (the JWT's `userId`), not per IP - an IP-based limit is trivially bypassed with multiple devices/browsers and doesn't distinguish two different users behind the same NAT. Each service has its own small token-bucket middleware (`src/rateLimit.ts`, duplicated rather than shared, matching this project's existing pattern for small self-contained modules): a burst of `RATE_LIMIT_MAX` requests (default 5) is allowed immediately, then tokens refill continuously over `RATE_LIMIT_WINDOW_SECONDS` (default 60s). Exceeding it returns `429` with a `Retry-After` header.
+
+**Trade-off**: buckets live in memory, per process - they reset if the service restarts, and wouldn't be shared across multiple replicas if either service were ever horizontally scaled (a Redis-backed limiter would be the natural upgrade there). A periodic sweep evicts buckets idle for over an hour so memory doesn't grow unbounded over a long-running process.
+
+## Configurable domains
+
+The two hostnames every project is reachable at are no longer hardcoded into the committed `service.yaml` - `service.yaml` now contains `ws_domain_placeholder`/`app_domain_placeholder` tokens, substituted at `/start` time from orchestrator-simple's `WS_DOMAIN`/`APP_DOMAIN` env vars (same mechanism as `service_name`). The frontend needs the matching `VITE_WS_DOMAIN`/`VITE_APP_DOMAIN` build-time env vars (only required if you're not using the `peetcode.com`/`autogpt-cloud.com` defaults) - see `frontend/.env.example`.
+
+## TLS via cert-manager
+
+By default everything in this repo runs over plain HTTP. Enabling HTTPS for every `<replId>.<domain>` subdomain deliberately does **not** mean issuing a new Let's Encrypt certificate per project - Let's Encrypt rate-limits certificates per registered domain per week, and this architecture can create and destroy projects (and their subdomains) far faster than that. Instead:
+
+1. Install [cert-manager](https://cert-manager.io/docs/installation/): `kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.14.5/cert-manager.yaml`
+2. Apply `k8s/cluster-issuer.yaml` - a Let's Encrypt `ClusterIssuer` using a DNS01 challenge (required for wildcard certs; HTTP01 doesn't support them). The template uses Cloudflare as the DNS solver - fill in your API token and email, and swap the `cloudflare` block for [your provider's solver](https://cert-manager.io/docs/configuration/acme/dns01/) if you're not on Cloudflare.
+3. Apply `k8s/wildcard-certificate.yaml` - **one** certificate covering `*.<WS_DOMAIN>` and `*.<APP_DOMAIN>` (edit the two domains in the file first). This is issued once and renewed automatically by cert-manager, producing a single `wildcard-tls` Secret in the `ingress-nginx` namespace.
+4. Uncomment the `--default-ssl-certificate=ingress-nginx/wildcard-tls` line in `k8s/ingress-controller.yaml` and re-apply it (`kubectl apply -f k8s/ingress-controller.yaml`).
+
+That's the whole mechanism: every project's Ingress deliberately has **no** `tls:` block of its own - the ingress controller's cluster-wide default certificate (step 4) covers every subdomain via SNI automatically, so HTTPS "just works" for new projects with zero additional cert-manager activity per project. Steps 1-4 are one-time cluster setup, not something `/start` does per project.
+
+**Why this is commented out / opt-in by default**: uncommenting `--default-ssl-certificate` before the referenced secret exists makes the ingress controller pod fail to start entirely - not just break TLS, break HTTP too. Leaving it commented keeps the base HTTP-only setup working for anyone who hasn't done the cert-manager steps yet.
+
 ## Known limitations
 
 - **Auth is anonymous/device-bound, not a real identity system** - see [Auth & ownership](#auth--ownership). Good enough to stop strangers from hijacking a `replId` they don't own; not a substitute for real accounts.
@@ -264,6 +324,10 @@ Two things to check before relying on this:
 - **No pod pre-warming.** Cold starts pay the full init-container S3 copy + image pull cost every time; this was explicitly deferred as a stretch goal (see [Lifecycle](#lifecycle-stop-graceful-shutdown-idle-timeout)).
 - **Resource usage monitoring requires `metrics-server`.** Without it, CPU/memory numbers in `/status` are always `null` (fails closed, doesn't break anything else) - the static `resources.limits` in the manifest are still enforced by Kubernetes itself either way, this only affects the *visibility* into usage.
 - **`/status` isn't admin-scoped.** Any authenticated (anonymous) caller can see every project's health/resource data cluster-wide, not just their own - see the trade-off note under [Monitoring & guardrails](#monitoring--guardrails).
+- **`/start` has an unavoidable ~4-8s capacity-check delay**, and a rapid stop-then-restart of the same `replId` can occasionally race a still-terminating namespace - see [Cluster capacity & retries](#cluster-capacity--retries) and [Namespace isolation](#namespace-isolation).
+- **Rate-limit buckets are in-memory, per-process** - reset on restart, not shared across replicas. See [Rate limiting](#rate-limiting).
+- **No queued-start pattern.** A cluster with no capacity returns a clear `503` (see [Cluster capacity & retries](#cluster-capacity--retries)), but the client has to retry itself - there's no server-side queue that automatically starts the project once capacity frees up.
+- **TLS is opt-in and cluster-wide, not per-project.** Every project shares one wildcard certificate rather than getting its own - see [TLS via cert-manager](#tls-via-cert-manager) for why, and note it's commented out by default so a fresh setup isn't forced through the cert-manager steps just to get HTTP working.
 
 This repo is the second iteration of [Session Multiplexer Code Shell](#), Same editor/terminal experience, rebuilt around per-project Kubernetes scheduling instead of a single shared host.
 
@@ -324,6 +388,58 @@ No frontend changes in this tier - `/stop` exists and works but isn't called fro
   - The alert webhook: confirmed (in an isolated repro after an initial test read its output file too early) that the real payload - project id, owner, reason, restart count - actually reaches an HTTP endpoint.
 
 All four backend/frontend surfaces type-check cleanly; the frontend banner addition introduced no new type errors (confirmed against the same 14 pre-existing ones from Priority 2, now at shifted line numbers).
+
+### Priority 5 — scaling & robustness (2026-07-26)
+
+- **Cluster capacity handling** (`orchestrator-simple/src/capacity.ts`): retry-with-backoff around resource creation for transient (5xx) API errors; a schedulability check after creation that detects a pod stuck `Unschedulable` and rolls back with a clear `503` instead of falsely reporting success; raw Kubernetes error bodies are translated into clean messages instead of ever reaching the frontend. A queued-start pattern (the heavier alternative the brief mentioned) was not pursued - documented as a trade-off.
+- **Per-user rate limiting** (`src/rateLimit.ts`, duplicated in both init-service and orchestrator-simple): token-bucket keyed by the authenticated `userId`, not IP, on `POST /project` and `POST /start`. Configurable burst size and refill window; a periodic sweep evicts idle buckets so memory doesn't grow unbounded.
+- **Namespace-per-project isolation** (stretch goal, implemented): `orchestrator-simple/src/namespace.ts` - every project gets its own `sandbox-<replId>` namespace instead of sharing `default`, created idempotently at `/start` and deleted wholesale at `/stop` (which also simplified `stop.ts` from four resource deletes to one namespace delete). Documented trade-offs: namespace deletion is asynchronous (a rapid stop-then-restart can race a still-terminating namespace), and this raises the RBAC bar from a namespaced Role to cluster-scoped permissions.
+- **Incidental fix, found while touching env-var loading for this tier**: the README's setup instructions (inherited from before Priority 1) told users to `cp src/.env.example src/.env` for init-service/orchestrator-simple - but `dotenv.config()` defaults to loading `.env` from the process's working directory, which is the service root when running `npm run dev`, not `src/`. Every env var this project uses (`JWT_SECRET`, `OWNERSHIP_DB_PATH`, etc., across every prior tier) would silently fail to load under the old instructions. Fixed the copy destination in the README, and added `.env` to `.gitignore` in all three backend services and the frontend (previously only `node_modules` was ignored for the backend services - a real gap, since `.env` would hold live AWS/JWT secrets).
+- **Verified functionally**, not just type-checked, with fake Kubernetes API responses and fake request/response objects:
+  - `namespaceForProject` naming, `ensureNamespace`'s idempotent handling of a 409 (and correct rethrow of non-409 errors), `deleteProjectNamespace`'s tolerance of 404.
+  - `withRetry`: retries a flaky call that fails twice with 503 then succeeds; does not retry a 400; exhausts its attempts and throws when a call always fails.
+  - `checkPodSchedulable` against three fake pod states: an explicit `Unschedulable` condition (detected in ~4s), a `Running` pod (detected in ~4s), and a pod stuck ambiguously `Pending` with no clear condition (correctly falls back to "schedulable" after the full ~12s check window - confirmed by actually waiting it out, not by inspecting the code).
+  - `translateK8sError`'s three branches (409, quota-exceeded 403, generic).
+  - The rate limiter: a burst of `RATE_LIMIT_MAX` requests succeeds and the next one is blocked with `429`+`Retry-After`; a second user's bucket is completely unaffected by the first user exhausting theirs; after waiting out the refill window, the first user can make requests again.
+
+### Priority 6 — networking & polish (2026-07-26)
+
+- **Configurable domains**: `service.yaml`'s two Ingress hostnames are now `ws_domain_placeholder`/`app_domain_placeholder` tokens, substituted at `/start` time from orchestrator-simple's `WS_DOMAIN`/`APP_DOMAIN` env vars (same mechanism as `service_name`) - no more editing real domains into a template that gets committed. The frontend gained matching `VITE_WS_DOMAIN`/`VITE_APP_DOMAIN` build-time env vars and a `.env.example` (it previously had none).
+- **TLS via cert-manager**: rather than issuing a certificate per ephemeral project (which risks Let's Encrypt's per-domain rate limits at this churn rate), every project shares **one** wildcard certificate covering both configured domains, applied once via `k8s/cluster-issuer.yaml` + `k8s/wildcard-certificate.yaml` and wired in as the ingress controller's cluster-wide default certificate (`k8s/ingress-controller.yaml`, one new arg). No per-project Ingress needs its own `tls:` block or any cert-manager annotation - HTTPS "just works" for every new subdomain with zero additional cert-manager activity per project start. Left commented out by default so a fresh HTTP-only setup isn't forced through the cert-manager steps.
+- **Verified**: all new/edited k8s YAML (`ingress-controller.yaml`, `cluster-issuer.yaml`, `wildcard-certificate.yaml`, `service.yaml`) parses without errors; the full manifest substitution (all four placeholder types together) was re-validated end to end.
+
+Frontend, init-service, and orchestrator-simple all changed in these two tiers; runner was untouched (P5/P6 are entirely about the scheduling/networking layer, not the per-pod runtime).
+
+## What's real vs. aspirational
+
+A honest tally across all six priority tiers, since the brief specifically asked for this:
+
+**Fully implemented and verified** (code review + type-checking + functional tests against fake/real dependencies, since no live Kubernetes cluster was available to test against in this environment):
+- Terminal session cleanup bug fix, with a real repro that fails on the old code and passes on the fix
+- Automatic run-on-start detection (Procfile/npm/pip)
+- Kubernetes Secret for credentials (out of the plaintext manifest)
+- JWT auth + SQLite ownership, enforced on `/project`, `/start`, and the runner's socket handshake
+- NetworkPolicy per project (with documented CNI/CIDR caveats)
+- `POST /stop` with final S3 sync and idempotent teardown
+- Idle-timeout auto-teardown reaper
+- Crash-loop/OOM detection, `health_status` tracking, `GET /status`, per-project status polling + frontend banner
+- Alerting webhook (the Priority 4 stretch goal)
+- Cluster capacity handling (retry-with-backoff, Unschedulable detection + rollback, clean error responses)
+- Per-user rate limiting on `/project` and `/start`
+- Namespace-per-project isolation (the Priority 5 stretch goal)
+- Configurable domains, TLS via a shared wildcard cert + cert-manager
+
+**Explicitly deferred, with reasoning documented inline**:
+- **Pod pre-warming** (Priority 3's stretch goal) - warm-pool management (claim/release, relabeling, a pre-creation loop against an empty workspace) is a meaningfully larger subsystem than anything else in this list; deferred until 1-3 were solid, per the brief's own instruction, and never circled back to given the scope already covered.
+- **Queued-start pattern** (Priority 5's heavier alternative to retry-with-backoff) - would need a real queue, a worker, and client-side polling for "still starting"; the brief explicitly offered retry-with-backoff as the lighter option.
+- **Frontend "Stop" button** - `POST /stop` is fully functional and tested, just not called from the UI. Small, deliberately left for whoever picks this up next since it wasn't explicitly required by any tier's task list.
+- **Admin-scoped `/status`** - there's no role/admin concept anywhere in this project's auth model, so the cluster-wide status view is available to any authenticated (anonymous) caller, not just operators. Documented as a trade-off rather than built around, since adding roles would be a real feature addition beyond what any tier asked for.
+
+**Real constraints worth knowing about, not bugs**:
+- init-service and orchestrator-simple share a SQLite file on the same filesystem/host - there's no message queue or shared hosted DB, by design, for this project's scale.
+- The auth model is anonymous and device-bound (a `localStorage` token), not real accounts - sufficient to stop strangers from touching a `replId` they didn't create, not a substitute for login/signup.
+- Rate-limit and alert/teardown-history state live in memory per process - none of it survives a restart or would be shared across replicas.
+- TLS, when enabled, is cluster-wide via one shared certificate, not per-project.
 
 ## License
 

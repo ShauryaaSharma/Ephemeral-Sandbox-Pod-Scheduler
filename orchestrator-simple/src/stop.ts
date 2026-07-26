@@ -1,22 +1,16 @@
 import axios from "axios";
-import { AppsV1Api, CoreV1Api, NetworkingV1Api } from "@kubernetes/client-node";
+import { CoreV1Api } from "@kubernetes/client-node";
 import { markStopped } from "./db";
+import { deleteProjectNamespace } from "./namespace";
 
 // Must match the ws-facing Ingress host in service.yaml (`<replId>.<WS_DOMAIN>`)
 // so this can reach the pod's Express app through the ingress controller -
 // orchestrator-simple has no direct network path to pods otherwise.
 const WS_DOMAIN = process.env.WS_DOMAIN ?? "peetcode.com";
-const NAMESPACE = "default";
 const SHUTDOWN_TIMEOUT_MS = 10_000;
 
-function isNotFoundError(err: unknown): boolean {
-    return (err as { statusCode?: number })?.statusCode === 404;
-}
-
 interface K8sApis {
-    appsV1Api: AppsV1Api;
     coreV1Api: CoreV1Api;
-    networkingV1Api: NetworkingV1Api;
 }
 
 export function createStopper(apis: K8sApis) {
@@ -32,22 +26,12 @@ export function createStopper(apis: K8sApis) {
             );
         }
 
-        const results = await Promise.allSettled([
-            apis.appsV1Api.deleteNamespacedDeployment(replId, NAMESPACE),
-            apis.coreV1Api.deleteNamespacedService(replId, NAMESPACE),
-            apis.networkingV1Api.deleteNamespacedIngress(replId, NAMESPACE),
-            apis.networkingV1Api.deleteNamespacedNetworkPolicy(replId, NAMESPACE),
-        ]);
-
-        const realFailures = results.filter(
-            (r): r is PromiseRejectedResult => r.status === "rejected" && !isNotFoundError(r.reason)
-        );
-        if (realFailures.length > 0) {
-            throw new Error(
-                `failed to delete ${realFailures.length} resource(s) for ${replId}: ` +
-                    realFailures.map((r) => (r.reason instanceof Error ? r.reason.message : String(r.reason))).join("; ")
-            );
-        }
+        // Each project has its own namespace (see namespace.ts), so deleting
+        // it cascades the Deployment/Service/Ingress/NetworkPolicy in one
+        // call instead of four separate deletes. Note this is asynchronous
+        // on the API server's side - the namespace may still be Terminating
+        // for a while after this resolves.
+        await deleteProjectNamespace(apis.coreV1Api, replId);
 
         markStopped(replId);
     };
