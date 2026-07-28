@@ -8,3 +8,8 @@ data/
 # Never commit a filled-in k8s Secret manifest - use k8s/create-secret.sh instead
 *.secret.yaml
 secret.yaml
+
+# Real credentials belong in each service's own .env (init-service/.env,
+# orchestrator-simple/.env, etc, all already gitignored individually) - this
+# catches one at the repo root too, in case one ever ends up here by mistake.
+.env
