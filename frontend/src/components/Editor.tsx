@@ -29,21 +29,29 @@ export const Editor = ({
   }, [selectedFile])
 
   return (
-    <div>
-      <Main>
-        <Sidebar>
-          <FileTree
-            rootDir={rootDir}
-            selectedFile={selectedFile}
-            onSelect={onSelect}
-          />
-        </Sidebar>
+    <Main>
+      <Sidebar>
+        <FileTree
+          rootDir={rootDir}
+          selectedFile={selectedFile}
+          onSelect={onSelect}
+        />
+      </Sidebar>
+      <CodeArea>
         <Code socket={socket} selectedFile={selectedFile} />
-      </Main>
-    </div>
+      </CodeArea>
+    </Main>
   );
 };
 
 const Main = styled.main`
   display: flex;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+`;
+
+const CodeArea = styled.div`
+  flex: 1;
+  min-width: 0;
 `;

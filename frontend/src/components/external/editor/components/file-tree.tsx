@@ -79,12 +79,17 @@ const Div = styled.div<{
 }>`
   display: flex;
   align-items: center;
-  padding-left: ${props => props.depth * 16}px;
-  background-color: ${props => props.isSelected ? "#242424" : "transparent"};
+  gap: 2px;
+  padding: 3px 10px 3px ${props => props.depth * 14 + 10}px;
+  font-size: 0.83rem;
+  color: ${props => props.isSelected ? "var(--fg)" : "var(--muted)"};
+  background-color: ${props => props.isSelected ? "var(--surface-3)" : "transparent"};
+  border-left: 2px solid ${props => props.isSelected ? "var(--accent)" : "transparent"};
 
   :hover {
     cursor: pointer;
-    background-color: #242424;
+    background-color: var(--surface-2);
+    color: var(--fg);
   }
 `
 
@@ -153,9 +158,11 @@ const FileIcon = ({extension, name}: { name?: string, extension?: string }) => {
 
 const Span = styled.span`
   display: flex;
-  width: 32px;
-  height: 32px;
+  width: 20px;
+  height: 22px;
   justify-content: center;
   align-items: center;
+  flex-shrink: 0;
+  font-size: 0.95rem;
 `
 
