@@ -14,6 +14,18 @@ spec:
       labels:
         app: service_name
     spec:
+      # Works around a real bug found while testing against a live cluster:
+      # glibc's getaddrinfo() issues parallel A/AAAA queries by default, and
+      # on this environment's networking that races on a shared socket and
+      # fails with "OSError: [Errno 16] Device or resource busy" - silently
+      # breaking every hostname-based connection for any Python/glibc-based
+      # process (confirmed via the init container's aws-cli failing while
+      # simpler tools like busybox's wget/nslookup, which don't hit the same
+      # glibc code path, worked fine). single-request forces sequential
+      # queries instead, avoiding the race entirely.
+      dnsConfig:
+        options:
+          - name: single-request
       volumes:
         - name: workspace-volume
           emptyDir: {}
@@ -48,7 +60,7 @@ spec:
               mountPath: /workspace
       containers:
         - name: runner
-          image: 100xdevs/runner:latest
+          image: ghcr.io/shauryaasharma/runner:latest
           ports:
             - containerPort: 3001
             - containerPort: 3000
@@ -81,12 +93,18 @@ spec:
               mountPath: /workspace
           resources:
             # Bounty $25 Use ephemeral-storage to add space limits here
+            # Lowered from 1 CPU/1Gi to fit on a free-tier Micro node (956Mi
+            # total RAM, shared with k3s itself + ingress-nginx) - found by
+            # actually trying to schedule a pod here and hitting "Insufficient
+            # memory" since the original 1Gi request alone exceeded the
+            # node's entire capacity. Raise this back up once running on
+            # real Ampere/bigger-node capacity.
             requests:
-              cpu: "1"
-              memory: "1Gi"
+              cpu: "100m"
+              memory: "256Mi"
             limits:
-              cpu: "1"
-              memory: "1Gi"
+              cpu: "500m"
+              memory: "400Mi"
 
 ---
 apiVersion: v1
@@ -198,5 +216,5 @@ spec:
         - ipBlock:
             cidr: 0.0.0.0/0
             except:
-              - 10.244.0.0/16 # pod CIDR - replace with your cluster's
-              - 10.96.0.0/12  # service CIDR (covers the API server) - replace with your cluster's
+              - 10.42.0.0/16 # pod CIDR - k3s default
+              - 10.43.0.0/16  # service CIDR (covers the API server) - k3s default

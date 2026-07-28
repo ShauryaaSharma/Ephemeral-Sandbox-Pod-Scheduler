@@ -401,8 +401,8 @@ spec:
                   fieldPath: metadata.namespace
             - name: LD_PRELOAD
               value: /usr/local/lib/libmimalloc.so
-          livenessProbe: 
-            failureThreshold: 5
+          livenessProbe:
+            failureThreshold: 10
             httpGet:
               path: /healthz
               port: 10254
@@ -410,9 +410,9 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 10
             successThreshold: 1
-            timeoutSeconds: 1
-          readinessProbe: 
-            failureThreshold: 3
+            timeoutSeconds: 10
+          readinessProbe:
+            failureThreshold: 6
             httpGet:
               path: /healthz
               port: 10254
@@ -420,7 +420,7 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 10
             successThreshold: 1
-            timeoutSeconds: 1
+            timeoutSeconds: 10
           ports:
             - name: http
               containerPort: 80
