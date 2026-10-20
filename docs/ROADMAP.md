@@ -15,3 +15,7 @@ Things deliberately not built yet, with enough of a design that building them la
 **Effort**: medium - mostly plumbing (a new gated endpoint, a timer, switching `aws.ts` from env vars to a re-read-able file mount for the three STS fields) rather than new concepts, since the actual AssumeRole/Secret-write logic already exists and is reused as-is.
 
 **Status**: not built. `scripts/aws/setup-iam.sh` could not be run against a real AWS account in the environment this was built in (no AWS CLI installed, no account available), so whether the orchestrator's own identity uses IRSA is unconfirmed either way - build this before relying on STS-scoped credentials on EKS specifically.
+
+## Admin view, if one is ever needed
+
+`ADMIN_USER_IDS` (see README "Monitoring & guardrails") is empty by default, meaning nobody gets the cluster-wide `/status` view. If an admin view becomes genuinely necessary: use a **separate admin token** (a distinct credential/auth path, checked independently of the anonymous per-browser `userId`), not a hardcoded or specially-flagged anonymous `userId`. An anonymous, device-bound identity (see README "Auth & ownership") is the wrong kind of credential to grant elevated, cluster-wide read access to - it's trivially re-mintable by anyone (`POST /auth/session` takes no auth at all) and was never designed to carry privilege.
