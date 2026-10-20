@@ -8,6 +8,7 @@
 #   # RS256 key pair - see README "Generating the JWT key pair"
 #   export JWT_PRIVATE_KEY="$(cat jwt-private.pem)"
 #   export JWT_PUBLIC_KEY="$(cat jwt-public.pem)"
+#   export INTERNAL_API_TOKEN=$(openssl rand -hex 32)
 #   ./k8s/create-secret.sh [namespace]
 #
 # Safe to commit: it only reads values from your shell environment at run
@@ -18,18 +19,21 @@ set -euo pipefail
 : "${AWS_SECRET_ACCESS_KEY:?Set AWS_SECRET_ACCESS_KEY in your environment first}"
 : "${JWT_PRIVATE_KEY:?Set JWT_PRIVATE_KEY in your environment first (see README 'Generating the JWT key pair')}"
 : "${JWT_PUBLIC_KEY:?Set JWT_PUBLIC_KEY in your environment first (see README 'Generating the JWT key pair')}"
+: "${INTERNAL_API_TOKEN:?Set INTERNAL_API_TOKEN in your environment first (e.g. export INTERNAL_API_TOKEN=\$(openssl rand -hex 32))}"
 
 NAMESPACE="${1:-default}"
 
 # sandbox-secrets: copied into every project namespace (namespace.ts) and
 # read by orchestrator-simple's own deployment. Only the PUBLIC verify key
 # goes in here - the private signing key must never reach a project
-# namespace or a runner pod.
+# namespace or a runner pod. INTERNAL_API_TOKEN gates the runner's internal
+# /health and /shutdown endpoints (see runner/src/index.ts).
 kubectl create secret generic sandbox-secrets \
   --namespace "$NAMESPACE" \
   --from-literal=AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
   --from-literal=AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
   --from-literal=JWT_PUBLIC_KEY="$JWT_PUBLIC_KEY" \
+  --from-literal=INTERNAL_API_TOKEN="$INTERNAL_API_TOKEN" \
   --dry-run=client -o yaml | kubectl apply -f -
 
 # init-service-secrets: the signing key. Only init-service's own deployment

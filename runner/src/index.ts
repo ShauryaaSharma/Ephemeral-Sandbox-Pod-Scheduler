@@ -6,6 +6,12 @@ import { initWs, terminalManager, getLastActivityAt } from "./ws";
 import cors from "cors";
 import { autoRunProject } from "./autorun";
 import { syncWorkspaceToS3, withTimeout } from "./sync";
+import { isValidInternalToken } from "./internalAuth";
+
+const INTERNAL_API_TOKEN = process.env.INTERNAL_API_TOKEN;
+if (!INTERNAL_API_TOKEN) {
+  throw new Error("INTERNAL_API_TOKEN environment variable is required");
+}
 
 // Node terminates the process on an unhandled promise rejection by default -
 // found the hard way (an unguarded fetchDir() call in ws.ts crashed the
@@ -25,12 +31,22 @@ const httpServer = createServer(app);
 
 initWs(httpServer);
 
-// Internal endpoints, called by orchestrator-simple (not the browser). They're
-// reachable at the same public ingress host as the rest of this app - see the
-// README's "Auth & ownership" trade-off note on why these two aren't token-gated.
+// Internal endpoints, called by orchestrator-simple (not the browser) - but
+// reachable at the same public ingress host as the rest of this app, so they
+// require this shared x-internal-token header (see README "Lifecycle" trade-off
+// note). The env whitelist in pty.ts/shellEnv.ts keeps this out of the user's
+// own terminal.
 const SYNC_TIMEOUT_MS = 8000;
 
-app.get("/health", (req, res) => {
+function requireInternalToken(req: express.Request, res: express.Response, next: express.NextFunction) {
+  if (!isValidInternalToken(req.headers["x-internal-token"], INTERNAL_API_TOKEN as string)) {
+    res.status(401).send({ message: "Invalid or missing internal token" });
+    return;
+  }
+  next();
+}
+
+app.get("/health", requireInternalToken, (req, res) => {
   res.json({
     status: "ok",
     replId: process.env.REPL_ID ?? "unknown",
@@ -38,7 +54,7 @@ app.get("/health", (req, res) => {
   });
 });
 
-app.post("/shutdown", async (req, res) => {
+app.post("/shutdown", requireInternalToken, async (req, res) => {
   console.log("[shutdown] received /shutdown request, syncing workspace to S3");
   try {
     await withTimeout(syncWorkspaceToS3(process.env.REPL_ID ?? "unknown"), SYNC_TIMEOUT_MS);

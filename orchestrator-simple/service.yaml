@@ -141,6 +141,11 @@ spec:
                 secretKeyRef:
                   name: sandbox-secrets
                   key: JWT_PUBLIC_KEY
+            - name: INTERNAL_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: sandbox-secrets
+                  key: INTERNAL_API_TOKEN
             - name: S3_BUCKET
               value: "your-bucket-name"
             - name: S3_ENDPOINT
