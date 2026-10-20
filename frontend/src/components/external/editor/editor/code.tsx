@@ -80,8 +80,8 @@ export const Code = ({ selectedFile, socket }: { selectedFile: File | undefined,
         theme="vs-dark"
         onChange={debounce((value) => {
           setSaveState("saving");
-          // Should send diffs, for now sending the whole file
-          // PR and win a bounty!
+          // Sends the whole file, not a diff - see the root README's
+          // Roadmap ("send diffs instead of full files").
           socket.emit("updateContent", { path: selectedFile.path, content: value });
           setSaveState("saved");
         }, 500)}

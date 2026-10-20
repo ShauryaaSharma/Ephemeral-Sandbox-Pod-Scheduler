@@ -1,32 +1,18 @@
-# React + TypeScript + Vite
+# landing
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+Static marketing page for [Ephemeral Sandbox Pod Scheduler](../README.md) - a React + Vite single-page app with no backend connection and no environment variables.
 
-Currently, two official plugins are available:
+Sections ([`src/App.tsx`](src/App.tsx), top to bottom): `Nav`, `Hero`, `HowItWorks`, `Security`, `SystemDesign`, `Stack`, `Marquee`, `Soon`, `What`. Each is a self-contained component under [`src/components/`](src/components/) with its own CSS file.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Scripts
 
-## React Compiler
+From `package.json`:
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+- `npm run dev` - Vite dev server (`:5173` by default).
+- `npm run build` - type-checks (`tsc -b`) then builds for production (`vite build`) into `dist/`.
+- `npm run preview` - serves the production build locally.
+- `npm run lint` - [Oxlint](https://oxc.rs/docs/guide/usage/linter.html).
 
-## Expanding the Oxlint configuration
+## Build & deploy
 
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
-```
-
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+`npm run build` produces a static `dist/` - deploy it anywhere static files are served, with no environment variables to configure. See [HOSTING_GUIDE.md](../HOSTING_GUIDE.md) for a worked example (Cloudflare Pages) deploying this alongside [`frontend/`](../frontend).

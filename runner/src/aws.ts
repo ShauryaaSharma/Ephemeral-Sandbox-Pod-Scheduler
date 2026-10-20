@@ -1,6 +1,7 @@
 import { S3 } from "aws-sdk"
 import fs from "fs";
 import path from "path";
+import { Readable } from "stream";
 
 const s3 = new S3({
     accessKeyId: process.env.AWS_ACCESS_KEY_ID,
@@ -34,9 +35,8 @@ export const fetchS3Folder = async (key: string, localPath: string): Promise<voi
                 }
                 const data = await s3.getObject(params).promise()
                 if (data.Body) {
-                    const fileData = data.Body
+                    const fileData = await toBuffer(data.Body)
                     const filePath = `${localPath}/${fileKey.replace(key, "")}`
-                    //@ts-ignore
                     await writeFile(filePath, fileData)
                 }
             }
@@ -80,6 +80,28 @@ export async function copyS3Folder(sourcePrefix: string, destinationPrefix: stri
     } catch (error) {
         console.error('Error copying folder:', error);
     }
+}
+
+// S3.Body is a union (Buffer | Uint8Array | Blob | string | Readable) since
+// the SDK's types cover both browser and Node usage, and both the buffered
+// (.promise()) and streaming (.createReadStream()) APIs - in this Node
+// runtime, via .promise(), it's always a Buffer in practice, but narrow it
+// properly instead of asserting that with a cast. (Typed as S3.Body rather
+// than spelling out "Blob" ourselves - aws-sdk's own Blob here is an empty
+// placeholder interface for browser bundling, structurally distinct from
+// the real DOM Blob type, and is never actually constructed in Node.)
+async function toBuffer(body: S3.Body): Promise<Buffer> {
+    if (Buffer.isBuffer(body)) return body;
+    if (typeof body === "string") return Buffer.from(body, "utf-8");
+    if (body instanceof Readable) {
+        const chunks: Buffer[] = [];
+        for await (const chunk of body) {
+            chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        }
+        return Buffer.concat(chunks);
+    }
+    if (body instanceof Uint8Array) return Buffer.from(body);
+    throw new Error("Unsupported S3 object body type (Blob is a browser-only type, never returned here)");
 }
 
 function writeFile(filePath: string, fileData: Buffer): Promise<void> {

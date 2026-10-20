@@ -2,6 +2,9 @@
   "name": "landing",
   "private": true,
   "version": "0.0.0",
+  "description": "Static marketing page for Ephemeral Sandbox Pod Scheduler.",
+  "author": "Shaurya",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite",

@@ -1,30 +1,39 @@
-# React + TypeScript + Vite
+# frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+The browser IDE for [Ephemeral Sandbox Pod Scheduler](../README.md) - a React + Vite single-page app with two routes:
 
-Currently, two official plugins are available:
+- `/` ([`Landing.tsx`](src/components/Landing.tsx)) - create a project (calls `init-service`'s `POST /project`).
+- `/coding` ([`CodingPage.tsx`](src/components/CodingPage.tsx)) - the actual editor and terminal for an opened project: a Monaco editor ([`Editor.tsx`](src/components/Editor.tsx)), an xterm.js terminal ([`Terminal.tsx`](src/components/Terminal.tsx)), and an `Output.tsx` iframe preview, all talking to that project's own pod.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react/README.md) uses [Babel](https://babeljs.io/) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+## Scripts
 
-## Expanding the ESLint configuration
+From `package.json`:
 
-If you are developing a production application, we recommend updating the configuration to enable type aware lint rules:
+- `npm run dev` - Vite dev server (`:5173` by default).
+- `npm run build` - type-checks (`tsc`) then builds for production (`vite build`) into `dist/`.
+- `npm run preview` - serves the production build locally.
+- `npm run lint` - ESLint.
 
-- Configure the top-level `parserOptions` property like this:
+## Environment variables
 
-```js
-export default {
-  // other rules...
-  parserOptions: {
-    ecmaVersion: 'latest',
-    sourceType: 'module',
-    project: ['./tsconfig.json', './tsconfig.node.json'],
-    tsconfigRootDir: __dirname,
-  },
-}
-```
+See [`.env.example`](.env.example) - only needed if you're not running everything on `localhost` with the default domains:
 
-- Replace `plugin:@typescript-eslint/recommended` to `plugin:@typescript-eslint/recommended-type-checked` or `plugin:@typescript-eslint/strict-type-checked`
-- Optionally add `plugin:@typescript-eslint/stylistic-type-checked`
-- Install [eslint-plugin-react](https://github.com/jsx-eslint/eslint-plugin-react) and add `plugin:react/recommended` & `plugin:react/jsx-runtime` to the `extends` list
+| Variable | Description |
+|---|---|
+| `VITE_INIT_SERVICE_URL` / `VITE_ORCHESTRATOR_URL` | Full base URLs for `init-service`/`orchestrator-simple`. **Required for any real deployment** - without them, a deployed frontend tries to reach its own `localhost`. |
+| `VITE_WS_DOMAIN` / `VITE_APP_DOMAIN` | Must match `orchestrator-simple`'s `WS_DOMAIN`/`APP_DOMAIN` - the two domains a project is reachable at. |
+| `VITE_USE_TLS` | `"true"` once cert-manager is set up cluster-side - switches the per-project socket/iframe connections from `ws`/`http` to `wss`/`https`. |
+
+## How it connects to the backend
+
+Every backend address is centralized in [`src/lib/config.ts`](src/lib/config.ts), built from the env vars above:
+
+1. On load, [`src/lib/auth.ts`](src/lib/auth.ts) calls `init-service`'s `POST /auth/session` and caches the anonymous token it gets back in `localStorage`.
+2. `Landing.tsx` sends that token as a bearer token to `init-service`'s `POST /project` to create a project.
+3. `CodingPage.tsx` sends it to `orchestrator-simple`'s `POST /start` to schedule the project's pod, then connects a Socket.IO client directly to `<replId>.<VITE_WS_DOMAIN>` (presenting the token in the handshake) for the editor/terminal, and points the `Output.tsx` iframe at `<replId>.<VITE_APP_DOMAIN>` for the running app preview.
+
+See the root [README](../README.md#how-it-works) for the full request flow across all services.
+
+## Build & deploy
+
+`npm run build` produces a static `dist/` - deploy it anywhere static files are served. See [HOSTING_GUIDE.md](../HOSTING_GUIDE.md) for a worked example (Cloudflare Pages). Whatever you use, set `VITE_INIT_SERVICE_URL`/`VITE_ORCHESTRATOR_URL` as build-time environment variables for that deployment - the defaults only work for local dev.

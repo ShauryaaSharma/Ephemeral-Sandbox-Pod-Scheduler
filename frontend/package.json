@@ -2,6 +2,9 @@
   "name": "frontend",
   "private": true,
   "version": "0.0.0",
+  "description": "Browser IDE for Ephemeral Sandbox Pod Scheduler - the editor and terminal UI.",
+  "author": "Shaurya",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite",
