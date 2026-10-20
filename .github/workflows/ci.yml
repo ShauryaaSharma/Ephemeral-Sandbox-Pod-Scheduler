@@ -1,0 +1,249 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Lets the optional kind-e2e-smoke-test job below be run by hand from the
+  # Actions tab - it never runs on a plain push/PR.
+  workflow_dispatch:
+
+env:
+  NODE_VERSION: "20"
+
+jobs:
+  init-service:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: init-service
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: init-service/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+
+  orchestrator-simple:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: orchestrator-simple
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: orchestrator-simple/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+
+  runner:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: runner
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: runner/package-lock.json
+      # node-pty builds a native binary at install time (ubuntu-latest has
+      # the compilers/python3 it needs for that out of the box).
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - run: npm run lint
+
+  landing:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: landing
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: landing/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - run: npm run lint
+
+  # Item 29: init-service and orchestrator-simple deliberately duplicate
+  # auth.ts/rateLimit.ts instead of sharing a package (see
+  # docs/engineering-gaps-proposal.md item 29) - this is the guard against
+  # the one real risk that choice carries, a fix landing in one copy and not
+  # the other. Add a matching line here whenever another file joins that
+  # duplicated-by-design set.
+  duplicated-code-diff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - run: diff init-service/src/rateLimit.ts orchestrator-simple/src/rateLimit.ts
+
+  npm-audit:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    strategy:
+      matrix:
+        package: [init-service, orchestrator-simple, runner, frontend, landing]
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - working-directory: ${{ matrix.package }}
+        run: npm audit --audit-level=high
+
+  docker-build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [init-service, orchestrator-simple, runner]
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: docker/setup-buildx-action@v4.4.1
+      - uses: docker/build-push-action@v7.4.0
+        with:
+          context: ${{ matrix.service }}
+          push: false
+
+  hadolint:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [init-service, orchestrator-simple, runner]
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: hadolint/hadolint-action@v3.5.0
+        with:
+          dockerfile: ${{ matrix.service }}/Dockerfile
+          # DL3066 (non-numeric USER) is expected and accepted on all three -
+          # each has a fixed uid baked in via useradd -u, so the name
+          # resolves deterministically. Only fail on a real error.
+          failure-threshold: error
+
+  manifest-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Install kubeconform
+        run: |
+          curl -sL https://github.com/yannh/kubeconform/releases/download/v0.8.0/kubeconform-linux-amd64.tar.gz | tar xz
+          sudo mv kubeconform /usr/local/bin/
+      - name: Substitute template placeholders
+        run: |
+          mkdir -p /tmp/manifests
+          cp k8s/*.yaml orchestrator-simple/service.yaml /tmp/manifests/
+          sed -i \
+            -e 's/<your-registry>/example.com\/registry/g' \
+            -e 's/<WS_DOMAIN>/ws.example.com/g' \
+            -e 's/<replId>/example-repl/g' \
+            -e 's/<domain>/example.com/g' \
+            -e 's/<pid>/1/g' \
+            -e 's/service_name/example-project/g' \
+            -e 's/owner_id_placeholder/example-owner/g' \
+            -e 's/aws_credentials_secret_placeholder/example-secret/g' \
+            -e 's/your-bucket-name/example-bucket/g' \
+            -e 's/your-s3-endpoint/https:\/\/example.com/g' \
+            -e 's/allowed_origins_placeholder/https:\/\/example.com/g' \
+            -e 's/node_env_placeholder/production/g' \
+            -e 's/workspace_storage_request_placeholder/512Mi/g' \
+            -e 's/workspace_storage_limit_placeholder/1Gi/g' \
+            -e 's/ws_domain_placeholder/ws.example.com/g' \
+            -e 's/app_domain_placeholder/app.example.com/g' \
+            -e 's/pod_cidr_placeholder/10.42.0.0\/16/g' \
+            -e 's/service_cidr_placeholder/10.43.0.0\/16/g' \
+            /tmp/manifests/*.yaml
+      - name: Validate with kubeconform
+        run: |
+          # -ignore-missing-schemas: cert-manager's ClusterIssuer/Certificate
+          # CRDs (k8s/cluster-issuer.yaml, k8s/wildcard-certificate.yaml)
+          # have no schema in kubeconform's default (core/Kubernetes-only)
+          # schema set - everything else here is a built-in kind and is
+          # fully validated.
+          kubeconform -summary -strict -ignore-missing-schemas \
+            -kubernetes-version 1.29.0 \
+            /tmp/manifests/*.yaml
+
+  # Optional, manual-trigger only - never blocks or reports on a normal
+  # push/PR. Builds the three images, boots a throwaway kind cluster, and
+  # confirms the schedulers actually come up and answer /healthz - not a
+  # full ingress/TLS/DNS end-to-end (those need real DNS and a cert-manager
+  # issuer this workflow has no way to provide), just a smoke test that the
+  # Deployments/RBAC/ConfigMap in k8s/ are internally consistent. Run it via
+  # the Actions tab ("Run workflow") before trusting it; it has not been
+  # exercised against a real cluster from this change.
+  kind-e2e-smoke-test:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: helm/kind-action@v1.15.1
+        with:
+          cluster_name: sandbox-ci
+      - name: Build images
+        run: |
+          docker build -t init-service:ci ./init-service
+          docker build -t orchestrator-simple:ci ./orchestrator-simple
+          docker build -t runner:ci ./runner
+      - name: Load images into kind
+        run: |
+          kind load docker-image init-service:ci --name sandbox-ci
+          kind load docker-image orchestrator-simple:ci --name sandbox-ci
+          kind load docker-image runner:ci --name sandbox-ci
+      - name: Apply RBAC and the scheduler Deployments
+        run: |
+          kubectl apply -f k8s/rbac.yaml
+          sed \
+            -e 's#<your-registry>/init-service:latest#init-service:ci#' \
+            -e 's#<your-registry>/orchestrator-simple:latest#orchestrator-simple:ci#' \
+            k8s/scheduler-services.yaml > /tmp/scheduler-services.ci.yaml
+          kubectl create configmap scheduler-config \
+            --from-literal=S3_BUCKET=example-bucket \
+            --from-literal=ALLOWED_ORIGINS=http://localhost:5173 \
+            --from-literal=NODE_ENV=development \
+            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl create secret generic sandbox-secrets \
+            --from-literal=JWT_PRIVATE_KEY=unused \
+            --from-literal=JWT_PUBLIC_KEY=unused \
+            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl create secret generic init-service-secrets \
+            --from-literal=JWT_PRIVATE_KEY=unused \
+            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl create secret generic orchestrator-secrets \
+            --from-literal=INTERNAL_API_MASTER_KEY=unused \
+            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl apply -f /tmp/scheduler-services.ci.yaml
+      - name: Wait for rollout and check health
+        run: |
+          kubectl rollout status deployment/init-service --timeout=120s
+          kubectl rollout status deployment/orchestrator-simple --timeout=120s
+          kubectl port-forward svc/init-service 3001:3001 &
+          sleep 2
+          curl -sf http://localhost:3001/healthz
