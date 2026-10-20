@@ -2,12 +2,14 @@ import dotenv from "dotenv"
 dotenv.config()
 import express from "express";
 import { createServer } from "http";
+import fs from "fs";
 import { initWs, terminalManager, getLastActivityAt, flushPendingS3Writes } from "./ws";
 import cors from "cors";
 import { autoRunProject } from "./autorun";
 import { syncWorkspaceToS3, withTimeout } from "./sync";
 import { isValidInternalToken } from "./internalAuth";
 import { ALLOWED_ORIGINS } from "./corsOrigins";
+import { WORKSPACE_DIR } from "./fs";
 
 const INTERNAL_API_TOKEN = process.env.INTERNAL_API_TOKEN;
 if (!INTERNAL_API_TOKEN) {
@@ -46,6 +48,23 @@ function requireInternalToken(req: express.Request, res: express.Response, next:
   }
   next();
 }
+
+// Unauthenticated and return no data (unlike /health below), so they're
+// safe for the kubelet to probe without the per-pod internal token - the
+// kubelet's stable probe API can't send custom headers anyway.
+let serverListening = false;
+
+app.get("/healthz", (req, res) => {
+  res.sendStatus(200);
+});
+
+app.get("/readyz", (req, res) => {
+  if (serverListening && fs.existsSync(WORKSPACE_DIR)) {
+    res.sendStatus(200);
+  } else {
+    res.sendStatus(503);
+  }
+});
 
 app.get("/health", requireInternalToken, (req, res) => {
   res.json({
@@ -90,6 +109,7 @@ process.on("SIGTERM", async () => {
 const port = process.env.PORT || 3001;
 httpServer.listen(port, () => {
   console.log(`listening on *:${port}`);
+  serverListening = true;
 });
 
 // Fire-and-forget: don't block server startup on install/start commands.

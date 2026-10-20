@@ -34,6 +34,13 @@ const app = express();
 app.use(express.json());
 app.use(cors({ origin: ALLOWED_ORIGINS }));
 
+// Unauthenticated and returns no data - safe for the kubelet to probe
+// (startup/readiness/liveness all point here; there's no slow dependency
+// to wait on separately, so one endpoint covers both).
+app.get("/healthz", (req, res) => {
+    res.sendStatus(200);
+});
+
 // Config-driven instead of baked into the committed service.yaml template -
 // WS_DOMAIN also has to match what runner/frontend use to reach a pod (see
 // stop.ts/reaper.ts and the frontend's VITE_WS_DOMAIN).

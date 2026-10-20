@@ -26,6 +26,10 @@ spec:
       dnsConfig:
         options:
           - name: single-request
+      # Must comfortably clear /shutdown's/SIGTERM's own SYNC_TIMEOUT_MS
+      # (8s, see runner/src/index.ts) with margin, since that final S3 sync
+      # has to finish inside this window before Kubernetes sends SIGKILL.
+      terminationGracePeriodSeconds: 20
       # No Kubernetes API access needed inside a project's own pod - it only
       # ever talks to S3/R2 and this pod's own filesystem/terminal.
       automountServiceAccountToken: false
@@ -140,6 +144,27 @@ spec:
           ports:
             - containerPort: 3001
             - containerPort: 3000
+          # Port 3001 only - 3000 is the user's own project dev server
+          # (the Output iframe), not this container's Express app, so it
+          # has nothing a probe could check. All three probes point at
+          # /healthz/readyz rather than /health, which is token-gated and
+          # which the kubelet's stable probe API can't send that header for.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: 3001
+            failureThreshold: 30
+            periodSeconds: 2
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 3001
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 3001
+            periodSeconds: 10
           env:
             # The uid/gid every terminal session (including autorun) is
             # spawned as - see runner/src/pty.ts. gid matches the pod's
