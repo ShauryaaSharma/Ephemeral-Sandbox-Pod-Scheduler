@@ -13,3 +13,8 @@ secret.yaml
 # orchestrator-simple/.env, etc, all already gitignored individually) - this
 # catches one at the repo root too, in case one ever ends up here by mistake.
 .env
+
+# OS/editor junk
+.DS_Store
+Thumbs.db
+*.log
