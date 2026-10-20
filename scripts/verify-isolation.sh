@@ -85,6 +85,14 @@ echo "== 4. Egress NetworkPolicy (A6) =="
 # required) - a successful connect means the destination is reachable, a
 # timeout/refusal means it's blocked (by the NetworkPolicy, assuming the
 # CNI enforces it - see README "Network policy" for the CNI caveat).
+#
+# Covers exactly what the NetworkPolicy's egress except list covers (see
+# orchestrator-simple/service.yaml): the cloud metadata endpoint, all three
+# RFC1918 ranges, and this cluster's own pod/service CIDRs specifically
+# (not just "some address in 10.0.0.0/8" - a cluster using a non-RFC1918
+# CIDR wouldn't be caught by the RFC1918 checks alone). Override
+# POD_CIDR_TEST_IP/SERVICE_CIDR_TEST_IP if your cluster's CIDRs aren't the
+# k3s defaults these fall back to.
 tcp_connect() {
   timeout 3 bash -c "exec 3<>/dev/tcp/$1/$2" 2>/dev/null
 }
@@ -101,10 +109,30 @@ else
   check "RFC1918 10.0.0.0/8 is blocked" 0
 fi
 
+if tcp_connect 172.16.0.1 80; then
+  check "RFC1918 172.16.0.0/12 is blocked" 1
+else
+  check "RFC1918 172.16.0.0/12 is blocked" 0
+fi
+
 if tcp_connect 192.168.0.1 80; then
   check "RFC1918 192.168.0.0/16 is blocked" 1
 else
   check "RFC1918 192.168.0.0/16 is blocked" 0
+fi
+
+POD_CIDR_TEST_IP="${POD_CIDR_TEST_IP:-10.42.0.1}"
+SERVICE_CIDR_TEST_IP="${SERVICE_CIDR_TEST_IP:-10.43.0.1}"
+if tcp_connect "$POD_CIDR_TEST_IP" 80; then
+  check "cluster pod CIDR ($POD_CIDR_TEST_IP) is blocked" 1
+else
+  check "cluster pod CIDR ($POD_CIDR_TEST_IP) is blocked" 0
+fi
+
+if tcp_connect "$SERVICE_CIDR_TEST_IP" 443; then
+  check "cluster service CIDR ($SERVICE_CIDR_TEST_IP) is blocked" 1
+else
+  check "cluster service CIDR ($SERVICE_CIDR_TEST_IP) is blocked" 0
 fi
 
 if tcp_connect 8.8.8.8 53; then
