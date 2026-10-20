@@ -37,10 +37,11 @@ rules:
   # namespace k8s/create-secret.sh created it in (default: "default"), so it
   # has to be read from there and copied into each new project namespace
   # (see namespace.ts's copySandboxSecret) for the runner's secretKeyRef envs
-  # to resolve at all.
+  # to resolve at all. "update" is also needed to replace the per-project
+  # STS-scoped credentials Secret on a retried /start (see sts.ts).
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["get", "create"]
+    verbs: ["get", "create", "update"]
   - apiGroups: ["apps"]
     resources: ["deployments"]
     verbs: ["create", "delete", "get", "list", "watch"]

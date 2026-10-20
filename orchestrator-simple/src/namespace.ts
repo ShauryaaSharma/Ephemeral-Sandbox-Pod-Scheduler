@@ -17,6 +17,13 @@ export function namespaceForProject(replId: string): string {
 const SECRETS_SOURCE_NAMESPACE = process.env.SECRETS_SOURCE_NAMESPACE ?? "default";
 const SANDBOX_SECRET_NAME = "sandbox-secrets";
 
+// Every project pod needs the public verify key; the bucket-wide AWS keys
+// are only copied in the legacy (no AWS_STS_ROLE_ARN) fallback - once STS is
+// configured, the pod gets its own per-project scoped credentials instead
+// (see sts.ts), so there's no reason to also hand it bucket-wide ones.
+const BASE_COPIED_KEYS = ["JWT_PUBLIC_KEY"];
+const LEGACY_AWS_KEYS = ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"];
+
 function isConflict(err: unknown): boolean {
     return (err as { statusCode?: number })?.statusCode === 409;
 }
@@ -25,13 +32,22 @@ function isNotFound(err: unknown): boolean {
     return (err as { statusCode?: number })?.statusCode === 404;
 }
 
-async function copySandboxSecret(coreV1Api: CoreV1Api, targetNamespace: string): Promise<void> {
+// Copies only the listed keys from the source Secret, not the whole thing -
+// a project namespace (and the pod inside it) should only ever receive what
+// it actually needs, not every credential the cluster-wide Secret happens to
+// hold (e.g. nothing here ever copies JWT_PRIVATE_KEY - that key doesn't
+// even live in this Secret, see auth.ts/create-secret.sh).
+async function copySandboxSecret(coreV1Api: CoreV1Api, targetNamespace: string, keys: string[]): Promise<void> {
     const { body: source } = await coreV1Api.readNamespacedSecret(SANDBOX_SECRET_NAME, SECRETS_SOURCE_NAMESPACE);
+    const data: Record<string, string> = {};
+    for (const key of keys) {
+        if (source.data?.[key]) data[key] = source.data[key];
+    }
     try {
         await coreV1Api.createNamespacedSecret(targetNamespace, {
             metadata: { name: SANDBOX_SECRET_NAME },
             type: source.type,
-            data: source.data,
+            data,
         });
     } catch (err) {
         if (!isConflict(err)) throw err;
@@ -40,7 +56,11 @@ async function copySandboxSecret(coreV1Api: CoreV1Api, targetNamespace: string):
 
 // Idempotent: safe to call even if the namespace already exists (e.g. a
 // retried /start, or restarting a previously-stopped project).
-export async function ensureNamespace(coreV1Api: CoreV1Api, replId: string): Promise<string> {
+export async function ensureNamespace(
+    coreV1Api: CoreV1Api,
+    replId: string,
+    includeLegacyAwsKeys: boolean
+): Promise<string> {
     const namespace = namespaceForProject(replId);
     try {
         await coreV1Api.createNamespace({
@@ -49,7 +69,8 @@ export async function ensureNamespace(coreV1Api: CoreV1Api, replId: string): Pro
     } catch (err) {
         if (!isConflict(err)) throw err;
     }
-    await copySandboxSecret(coreV1Api, namespace);
+    const keys = includeLegacyAwsKeys ? [...BASE_COPIED_KEYS, ...LEGACY_AWS_KEYS] : BASE_COPIED_KEYS;
+    await copySandboxSecret(coreV1Api, namespace, keys);
     return namespace;
 }
 

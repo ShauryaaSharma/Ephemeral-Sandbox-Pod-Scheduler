@@ -15,6 +15,7 @@ import { getPodResourceUsage } from "./monitor";
 import { ensureNamespace, deleteProjectNamespace } from "./namespace";
 import { withRetry, checkPodSchedulable, translateK8sError } from "./capacity";
 import { rateLimit } from "./rateLimit";
+import { assumeRoleForProject, isStsEnabled, writeProjectCredentialsSecret, PROJECT_CREDENTIALS_SECRET_NAME } from "./sts";
 
 // Express 4 doesn't catch a rejected async route handler for you - an
 // unguarded await that throws becomes an unhandled rejection, which Node
@@ -81,12 +82,26 @@ app.post("/start", requireAuth, rateLimit, async (req, res) => {
     }
 
     try {
-        const namespace = await ensureNamespace(coreV1Api, replId);
+        const namespace = await ensureNamespace(coreV1Api, replId, !isStsEnabled());
+
+        // With AWS_STS_ROLE_ARN set, this project's pod gets its own
+        // short-lived credentials scoped to code/<replId>/* instead of the
+        // bucket-wide keys in sandbox-secrets (see sts.ts). Without it, the
+        // manifest below falls back to sandbox-secrets, already copied into
+        // this namespace by ensureNamespace above.
+        let awsCredentialsSecretName = "sandbox-secrets";
+        if (isStsEnabled()) {
+            const credentials = await assumeRoleForProject(replId);
+            await writeProjectCredentialsSecret(coreV1Api, namespace, credentials);
+            awsCredentialsSecretName = PROJECT_CREDENTIALS_SECRET_NAME;
+        }
+
         const kubeManifests = readAndParseKubeYaml(path.join(__dirname, "../service.yaml"), {
             service_name: replId,
             owner_id_placeholder: project.ownerId,
             ws_domain_placeholder: WS_DOMAIN,
             app_domain_placeholder: APP_DOMAIN,
+            aws_credentials_secret_placeholder: awsCredentialsSecretName,
         });
         for (const manifest of kubeManifests) {
             switch (manifest.kind) {

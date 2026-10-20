@@ -15,12 +15,18 @@ kind: ConfigMap
 metadata:
   name: scheduler-config
 data:
-  # init-service only
+  # init-service, and orchestrator-simple too when AWS_STS_ROLE_ARN below is
+  # set (needed to build the per-project STS session policy's resource ARN)
   S3_BUCKET: "your-bucket-name"
   S3_ENDPOINT: "your-s3-endpoint"
   RATE_LIMIT_MAX: "5"
   RATE_LIMIT_WINDOW_SECONDS: "60"
   # orchestrator-simple only
+  # ARN of an IAM role orchestrator-simple can assume to mint per-project S3
+  # credentials scoped to code/<replId>/*. Leave blank to keep the legacy
+  # bucket-wide-credentials fallback (see README "Scoped S3 credentials").
+  AWS_STS_ROLE_ARN: ""
+  AWS_STS_SESSION_DURATION_SECONDS: "3600"
   WS_DOMAIN: "peetcode.com"
   APP_DOMAIN: "autogpt-cloud.com"
   IDLE_TIMEOUT_MINUTES: "15"

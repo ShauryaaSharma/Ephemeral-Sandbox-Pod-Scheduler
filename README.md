@@ -230,6 +230,9 @@ Everything above runs over plain HTTP. To serve `<replId>.<domain>` over HTTPS, 
 | `CRASH_RESTART_THRESHOLD` | orchestrator-simple | Restart count at which a pod is considered crash-looping, even without an explicit `CrashLoopBackOff` reason yet. Default `5`. |
 | `ALERT_WEBHOOK_URL` | orchestrator-simple | Optional Slack-compatible webhook (`{text: "..."}`) fired when a project starts crash-looping. Unset = no alerting. |
 | `RATE_LIMIT_MAX` / `RATE_LIMIT_WINDOW_SECONDS` | init-service, orchestrator-simple | Per-user token-bucket rate limit on `POST /project` / `POST /start` - burst size (default `5`) and refill window in seconds (default `60`). See [Rate limiting](#rate-limiting). |
+| `AWS_STS_ROLE_ARN` | orchestrator-simple | IAM role ARN to assume (`sts:AssumeRole`) for per-project, prefix-scoped S3 credentials. Unset = legacy bucket-wide fallback. See [Scoped S3 credentials](#scoped-s3-credentials). |
+| `AWS_STS_SESSION_DURATION_SECONDS` | orchestrator-simple | How long a project's STS session credentials are valid for. Default `3600` (1h). Not refreshed mid-session - see [Scoped S3 credentials](#scoped-s3-credentials). |
+| `AWS_SESSION_TOKEN` | runner, init container | STS session token, present only when the pod was issued per-project scoped credentials (see above). Unset in the legacy fallback. |
 | `VITE_WS_DOMAIN` / `VITE_APP_DOMAIN` | frontend | Must match `WS_DOMAIN`/`APP_DOMAIN` above. Only need a `.env` at all if your domains differ from the defaults. |
 | `VITE_INIT_SERVICE_URL` / `VITE_ORCHESTRATOR_URL` | frontend | Full base URLs (protocol+host+port) for init-service/orchestrator-simple, wherever you deploy them. Defaults (`http://localhost:3001`/`:3002`) only work when running everything on one machine - **required** for any real deployment, since the frontend runs in the user's browser, not on your server. |
 | `VITE_USE_TLS` | frontend | Set to `"true"` once [TLS via cert-manager](#tls-via-cert-manager) is set up - switches the per-project socket/iframe connections from `ws`/`http` to `wss`/`https`. Default `false`. |
@@ -301,6 +304,20 @@ Every project now gets its own Kubernetes namespace (`sandbox-<replId>`, `orches
 - The crash-loop health monitor and resource-usage checks look up pods in the project's own namespace, not `default`.
 - **Trade-off**: namespace deletion is asynchronous in Kubernetes (a `Terminating` phase with finalizers) - this repo's `deleteNamespace` call returning doesn't mean the namespace is actually gone yet. A rapid stop-then-immediately-restart of the *same* `replId` can hit a conflict creating the new namespace while the old one is still terminating. In practice this resolves itself within seconds to a couple minutes; there's no special handling for it here (a fixed retry-with-backoff on `ensureNamespace` would be the natural next step if this becomes a real pain point).
 - **RBAC trade-off**: see the note in [Getting started, step 2](#2-configure-the-manifest-template) - this needs cluster-scoped permissions now, not a namespace-scoped Role.
+
+## Scoped S3 credentials
+
+By default (if `AWS_STS_ROLE_ARN` is unset), every project's pod is handed the same bucket-wide `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` from `sandbox-secrets` - **this mode is not isolated per project**: a malicious user's pod can read or write any other project's files in the bucket, not just their own.
+
+Setting `AWS_STS_ROLE_ARN` (an IAM role `orchestrator-simple` can `sts:AssumeRole`) turns this on:
+
+1. At `POST /start`, `orchestrator-simple` (`src/sts.ts`) calls `AssumeRole` with a session policy restricting the resulting temporary credentials to `s3:GetObject`/`PutObject` on `code/<replId>/*` and `s3:ListBucket` on the bucket with an `s3:prefix` condition matching that same prefix - nothing else in the bucket is reachable.
+2. The temporary `AccessKeyId`/`SecretAccessKey`/`SessionToken` are written to a `sandbox-project-credentials` Secret in that project's own namespace (next to the copied `sandbox-secrets`), which both the init container and the `runner` container read via `secretKeyRef` (the manifest's `aws_credentials_secret_placeholder` is substituted to this Secret's name instead of `sandbox-secrets`).
+3. `namespace.ts`'s `ensureNamespace` only copies the bucket-wide AWS keys into a project's `sandbox-secrets` Secret when STS is **not** configured - when it is, that Secret only ever carries `JWT_PUBLIC_KEY` into the namespace, and the pod's actual S3 credentials come from the scoped Secret above.
+
+`orchestrator-simple` itself needs its own AWS identity capable of `sts:AssumeRole` on the configured role - wherever it runs (a plain credential-chain lookup via the AWS SDK: env vars, a shared credentials file, an EC2 instance profile, or IRSA on EKS). This repo doesn't provision that identity or the IAM role/trust policy for you - see "Needs your decision" in any security review of this feature.
+
+**Trade-off**: the STS session (default `AWS_STS_SESSION_DURATION_SECONDS=3600`, 1h) is not refreshed mid-session - a project open longer than that keeps working for everything already cached, but a fresh S3 call after expiry will start failing with an expired-credentials error until the project is restarted (which re-assumes a fresh session). Raise the duration (up to your role's `MaxSessionDuration`) or restart long-running projects periodically until this is addressed.
 
 ## Cluster capacity & retries
 
@@ -405,6 +422,7 @@ VITE_ORCHESTRATOR_URL=http://api.peetcode.com
 - **`/start` has an unavoidable ~4-8s capacity-check delay**, and a rapid stop-then-restart of the same `replId` can occasionally race a still-terminating namespace - see [Cluster capacity & retries](#cluster-capacity--retries) and [Namespace isolation](#namespace-isolation).
 - **Rate-limit buckets are in-memory, per-process** - reset on restart, not shared across replicas. See [Rate limiting](#rate-limiting).
 - **No queued-start pattern.** A cluster with no capacity returns a clear `503` (see [Cluster capacity & retries](#cluster-capacity--retries)), but the client has to retry itself - there's no server-side queue that automatically starts the project once capacity frees up.
+- **S3 credential isolation is opt-in.** Without `AWS_STS_ROLE_ARN` set, every project's pod shares the same bucket-wide credentials - see [Scoped S3 credentials](#scoped-s3-credentials) for the opt-in per-project-scoped alternative and its own trade-off (STS sessions aren't refreshed mid-session).
 - **TLS is opt-in and cluster-wide, not per-project.** Every project shares one wildcard certificate rather than getting its own - see [TLS via cert-manager](#tls-via-cert-manager) for why, and note it's commented out by default so a fresh setup isn't forced through the cert-manager steps just to get HTTP working.
 
 This repo is the second iteration of [Session Multiplexer Code Shell](#), Same editor/terminal experience, rebuilt around per-project Kubernetes scheduling instead of a single shared host.

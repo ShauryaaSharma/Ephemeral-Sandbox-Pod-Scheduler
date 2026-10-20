@@ -43,16 +43,27 @@ spec:
               aws s3 cp s3://your-bucket-name/code/service_name/ /workspace/ --recursive ${S3_ENDPOINT:+--endpoint-url "$S3_ENDPOINT"} &&
               echo "Resources copied from S3";
           env:
+            # aws_credentials_secret_placeholder is substituted at /start time
+            # to either "sandbox-secrets" (bucket-wide, legacy fallback) or
+            # the per-project STS-scoped secret - see orchestrator-simple's
+            # sts.ts/index.ts. AWS_SESSION_TOKEN is optional because the
+            # legacy secret doesn't have one.
             - name: AWS_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:
-                  name: sandbox-secrets
+                  name: aws_credentials_secret_placeholder
                   key: AWS_ACCESS_KEY_ID
             - name: AWS_SECRET_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
-                  name: sandbox-secrets
+                  name: aws_credentials_secret_placeholder
                   key: AWS_SECRET_ACCESS_KEY
+            - name: AWS_SESSION_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: aws_credentials_secret_placeholder
+                  key: AWS_SESSION_TOKEN
+                  optional: true
             - name: S3_ENDPOINT
               value: "your-s3-endpoint" # leave blank for real AWS S3; set for R2/MinIO/etc - must match the runner container's S3_ENDPOINT below
           volumeMounts:
@@ -72,13 +83,19 @@ spec:
             - name: AWS_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:
-                  name: sandbox-secrets
+                  name: aws_credentials_secret_placeholder
                   key: AWS_ACCESS_KEY_ID
             - name: AWS_SECRET_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
-                  name: sandbox-secrets
+                  name: aws_credentials_secret_placeholder
                   key: AWS_SECRET_ACCESS_KEY
+            - name: AWS_SESSION_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: aws_credentials_secret_placeholder
+                  key: AWS_SESSION_TOKEN
+                  optional: true
             - name: JWT_PUBLIC_KEY
               valueFrom:
                 secretKeyRef:
