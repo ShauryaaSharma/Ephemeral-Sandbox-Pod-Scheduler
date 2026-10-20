@@ -4,7 +4,7 @@ Browser IDE that provisions a real, isolated Kubernetes pod per project on deman
 
 ## What this is
 
-A browser-based code editor and terminal, like [Session Multiplexer Code Shell](#), rebuilt so every project gets its **own isolated compute** instead of sharing one host. Opening a project schedules a dedicated Kubernetes pod just for it, with its own filesystem, CPU/memory limits, and a real shell, reachable at its own subdomain, and torn down independently of every other project.
+A browser-based code editor and terminal where every project gets its **own isolated compute** instead of sharing one host. Opening a project schedules a dedicated Kubernetes pod just for it, with its own filesystem, CPU/memory limits, and a real shell, reachable at its own subdomain, and torn down independently of every other project.
 
 ## How it works
 
@@ -436,8 +436,6 @@ VITE_ORCHESTRATOR_URL=http://api.peetcode.com
 - **No queued-start pattern.** A cluster with no capacity returns a clear `503` (see [Cluster capacity & retries](#cluster-capacity--retries)), but the client has to retry itself - there's no server-side queue that automatically starts the project once capacity frees up.
 - **S3 credential isolation is opt-in.** Without `AWS_STS_ROLE_ARN` set, every project's pod shares the same bucket-wide credentials - see [Scoped S3 credentials](#scoped-s3-credentials) for the opt-in per-project-scoped alternative and its own trade-off (STS sessions aren't refreshed mid-session).
 - **TLS is opt-in and cluster-wide, not per-project.** Every project shares one wildcard certificate rather than getting its own - see [TLS via cert-manager](#tls-via-cert-manager) for why, and note it's commented out by default so a fresh setup isn't forced through the cert-manager steps just to get HTTP working.
-
-This repo is the second iteration of [Session Multiplexer Code Shell](#), Same editor/terminal experience, rebuilt around per-project Kubernetes scheduling instead of a single shared host.
 
 ## Changelog
 
