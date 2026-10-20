@@ -21,7 +21,7 @@ const HEALTH_POLL_INTERVAL_MS = 20000;
 
 // Polls orchestrator-simple's per-project status endpoint so the user sees
 // "this project's pod is unhealthy" instead of a silently broken terminal
-// (see Priority 4's crash-loop detection).
+// (see orchestrator-simple/src/healthMonitor.ts's crash-loop detection).
 function useProjectHealth(replId: string): ProjectHealth | null {
     const [health, setHealth] = useState<ProjectHealth | null>(null);
 

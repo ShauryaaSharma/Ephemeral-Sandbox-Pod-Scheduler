@@ -1,8 +1,8 @@
 // Centralizes every deployment-configurable endpoint the frontend talks to.
 // Without this, the app only ever worked from localhost - init-service and
 // orchestrator-simple were hardcoded, and the per-project subdomains always
-// assumed plain HTTP/WS, so enabling TLS backend-side (Priority 6) did
-// nothing for actual browser connections.
+// assumed plain HTTP/WS, so enabling TLS backend-side alone did nothing for
+// actual browser connections.
 
 // init-service and orchestrator-simple are two ordinary long-running
 // services you deploy yourself, wherever that ends up being - unlike the

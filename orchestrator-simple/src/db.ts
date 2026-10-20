@@ -26,10 +26,10 @@ db.exec(`
     )
 `);
 
-// Defensive migration for a DB file created before these columns existed
-// (e.g. during Priority 2/3 development) - CREATE TABLE IF NOT EXISTS above
-// is a no-op against an already-existing table, so an older file would
-// otherwise be missing these and fail at query time.
+// Defensive migration for a DB file created before these columns existed -
+// CREATE TABLE IF NOT EXISTS above is a no-op against an already-existing
+// table, so an older file would otherwise be missing these and fail at
+// query time.
 function addColumnIfMissing(sql: string) {
     try {
         db.exec(sql);
