@@ -26,12 +26,37 @@ spec:
       dnsConfig:
         options:
           - name: single-request
+      # No Kubernetes API access needed inside a project's own pod - it only
+      # ever talks to S3/R2 and this pod's own filesystem/terminal.
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        # Owns the emptyDir volume below so both containers (even one not
+        # running as this uid) can read/write it - not needed here since
+        # both already run as 1000, but kept explicit for clarity/safety if
+        # that ever changes.
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
       volumes:
         - name: workspace-volume
           emptyDir: {}
       initContainers:
         - name: copy-s3-resources
           image: amazon/aws-cli
+          # Same uid as the runner container below, so the files it writes
+          # into /workspace are owned by the uid that later reads/writes them.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
           command: ["/bin/sh", "-c"]
           args:
             # --endpoint-url is conditional (${S3_ENDPOINT:+...}) so this
@@ -72,6 +97,15 @@ spec:
       containers:
         - name: runner
           image: ghcr.io/shauryaasharma/runner:latest
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
           ports:
             - containerPort: 3001
             - containerPort: 3000

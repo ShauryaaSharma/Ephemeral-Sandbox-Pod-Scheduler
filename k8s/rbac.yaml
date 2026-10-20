@@ -53,6 +53,13 @@ rules:
   - apiGroups: ["metrics.k8s.io"]
     resources: ["pods"]
     verbs: ["get", "list"]
+  # Per-project ResourceQuota/LimitRange, created alongside the namespace
+  # itself (see namespace.ts's ensureNamespace) - "create" only, since they
+  # don't need updating once set and are deleted automatically along with
+  # the namespace they live in.
+  - apiGroups: [""]
+    resources: ["resourcequotas", "limitranges"]
+    verbs: ["create", "get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

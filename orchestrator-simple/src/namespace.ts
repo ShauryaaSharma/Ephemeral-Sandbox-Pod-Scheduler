@@ -54,6 +54,57 @@ async function copySandboxSecret(coreV1Api: CoreV1Api, targetNamespace: string, 
     }
 }
 
+const RESOURCE_QUOTA_NAME = "sandbox-quota";
+const LIMIT_RANGE_NAME = "sandbox-limits";
+
+// A single project namespace holds exactly one Deployment/pod/Service/Ingress
+// by design - this quota is deliberately generous around that, not a tight
+// fit, so it only ever catches something going actually wrong (a runaway
+// retry loop, a manifest bug), not normal operation.
+async function ensureResourceQuota(coreV1Api: CoreV1Api, namespace: string): Promise<void> {
+    try {
+        await coreV1Api.createNamespacedResourceQuota(namespace, {
+            metadata: { name: RESOURCE_QUOTA_NAME },
+            spec: {
+                hard: {
+                    pods: "2",
+                    "requests.cpu": "500m",
+                    "requests.memory": "512Mi",
+                    "requests.ephemeral-storage": "2Gi",
+                    "limits.cpu": "1",
+                    "limits.memory": "1Gi",
+                    "limits.ephemeral-storage": "2Gi",
+                    "count/ingresses.networking.k8s.io": "2",
+                },
+            },
+        });
+    } catch (err) {
+        if (!isConflict(err)) throw err;
+    }
+}
+
+// Backstop for any container that doesn't specify its own resources -
+// service.yaml's containers always do, but this still protects against a
+// future container definition that forgets to.
+async function ensureLimitRange(coreV1Api: CoreV1Api, namespace: string): Promise<void> {
+    try {
+        await coreV1Api.createNamespacedLimitRange(namespace, {
+            metadata: { name: LIMIT_RANGE_NAME },
+            spec: {
+                limits: [
+                    {
+                        type: "Container",
+                        _default: { cpu: "500m", memory: "400Mi", "ephemeral-storage": "1Gi" },
+                        defaultRequest: { cpu: "100m", memory: "256Mi", "ephemeral-storage": "512Mi" },
+                    },
+                ],
+            },
+        });
+    } catch (err) {
+        if (!isConflict(err)) throw err;
+    }
+}
+
 // Idempotent: safe to call even if the namespace already exists (e.g. a
 // retried /start, or restarting a previously-stopped project).
 export async function ensureNamespace(
@@ -64,11 +115,23 @@ export async function ensureNamespace(
     const namespace = namespaceForProject(replId);
     try {
         await coreV1Api.createNamespace({
-            metadata: { name: namespace, labels: { "sandbox-scheduler/repl-id": replId } },
+            metadata: {
+                name: namespace,
+                labels: {
+                    "sandbox-scheduler/repl-id": replId,
+                    // Pod Security Admission: rejects any pod spec in this
+                    // namespace that doesn't meet the "baseline" profile
+                    // (e.g. privileged containers, host namespaces) even if
+                    // a future manifest change forgets to ask for it itself.
+                    "pod-security.kubernetes.io/enforce": "baseline",
+                },
+            },
         });
     } catch (err) {
         if (!isConflict(err)) throw err;
     }
+    await ensureResourceQuota(coreV1Api, namespace);
+    await ensureLimitRange(coreV1Api, namespace);
     const keys = includeLegacyAwsKeys ? [...BASE_COPIED_KEYS, ...LEGACY_AWS_KEYS] : BASE_COPIED_KEYS;
     await copySandboxSecret(coreV1Api, namespace, keys);
     return namespace;
