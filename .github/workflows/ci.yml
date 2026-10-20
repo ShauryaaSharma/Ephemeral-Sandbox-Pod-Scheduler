@@ -108,7 +108,6 @@ jobs:
 
   npm-audit:
     runs-on: ubuntu-latest
-    continue-on-error: true
     strategy:
       matrix:
         package: [init-service, orchestrator-simple, runner, frontend, landing]
@@ -117,8 +116,13 @@ jobs:
       - uses: actions/setup-node@v7.1.0
         with:
           node-version: ${{ env.NODE_VERSION }}
+      # continue-on-error here (not on the job) so the job itself still
+      # reports success/green - a job-level continue-on-error still shows
+      # the job as failing in the PR checks list, which defeats the point
+      # of this being advisory rather than a gate.
       - working-directory: ${{ matrix.package }}
         run: npm audit --audit-level=high
+        continue-on-error: true
 
   docker-build:
     runs-on: ubuntu-latest

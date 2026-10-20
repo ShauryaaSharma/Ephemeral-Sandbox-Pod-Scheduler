@@ -11,11 +11,12 @@ RUN npm run build
 
 FROM node:20.18.1-bookworm-slim
 WORKDIR /code
-# Numeric uid/gid so Kubernetes' runAsNonRoot check (which inspects the
-# image, not /etc/passwd) is satisfiable, and so this uid can write the
-# ownership DB once the Deployment mounts /data with a matching fsGroup
-# (see k8s/scheduler-services.yaml).
-RUN groupadd -g 1000 app && useradd -u 1000 -g app -m -s /usr/sbin/nologin app
+# The base image already ships a "node" user/group at uid/gid 1000 (confirmed
+# by actually building this - a redundant groupadd here fails with "GID 1000
+# already exists") - reuse it below instead of creating a new one. Matches
+# Kubernetes' runAsUser/runAsGroup/fsGroup (1000) in k8s/scheduler-services.yaml,
+# and lets that uid write the ownership DB once the Deployment mounts /data
+# with a matching fsGroup.
 COPY package*.json ./
 # --omit=dev: this stage ships to the pod, so build-only deps (typescript)
 # don't belong in the final image. Installed fresh here (not copied from
@@ -23,7 +24,7 @@ COPY package*.json ./
 # own base image.
 RUN npm ci --omit=dev
 COPY --from=build /code/dist ./dist
-USER app
+USER node
 
 # orchestrator-simple listens on 3002 by default (see PORT in src/.env.example)
 EXPOSE 3002
