@@ -5,10 +5,24 @@ import { fetchDir, fetchFileContent, saveFile, resolveInWorkspace, WORKSPACE_DIR
 import { TerminalManager } from "./pty";
 import { verifyToken } from "./auth";
 import { ALLOWED_ORIGINS } from "./corsOrigins";
+import { S3WriteDebouncer } from "./s3WriteDebouncer";
 
 // Default 1MB - env-configurable since some projects legitimately have
 // larger generated/vendored files.
 const MAX_UPDATE_CONTENT_BYTES = Number(process.env.MAX_FILE_UPDATE_BYTES) || 1024 * 1024;
+
+// Default 1500ms trailing debounce - env-configurable. Coalesces a burst of
+// edits (e.g. every keystroke) into one S3 write per file instead of one
+// PUT per edit; the local disk write in updateContent below is never
+// debounced, only the S3 upload.
+const S3_WRITE_DEBOUNCE_MS = Number(process.env.S3_WRITE_DEBOUNCE_MS) || 1500;
+const s3WriteDebouncer = new S3WriteDebouncer(saveToS3, S3_WRITE_DEBOUNCE_MS);
+
+// Called from index.ts on /shutdown and SIGTERM, so a save made just before
+// either doesn't get lost waiting out the debounce window.
+export function flushPendingS3Writes(): Promise<void> {
+    return s3WriteDebouncer.flush();
+}
 
 // Shared with autorun.ts so the auto-started project process lives in the
 // same registry as user-opened terminal sessions.
@@ -105,6 +119,9 @@ function initHandlers(socket: Socket, replId: string) {
         // Each socket owns exactly one terminal, keyed by its own socket.id -
         // without this the underlying PTY process outlived the connection.
         terminalManager.clear(socket.id);
+        // Don't leave a debounced S3 write hanging past the session that
+        // made it.
+        flushPendingS3Writes().catch((err) => console.error(`flush on disconnect failed for ${replId}:`, err));
     });
 
     socket.on("fetchDir", async (dir: string, callback) => {
@@ -131,8 +148,8 @@ function initHandlers(socket: Socket, replId: string) {
         }
     });
 
-    // TODO: contents should be diff, not full file
-    // Should be throttled before updating S3 (or use an S3 mount)
+    // Sends the whole file on every edit, not a diff - see README Roadmap
+    // ("send diffs instead of full files").
     socket.on("updateContent", async ({ path: filePath, content }: { path: string, content: string }) => {
         touch();
         try {
@@ -145,9 +162,12 @@ function initHandlers(socket: Socket, replId: string) {
             // Built from the same validated/normalized path as the local
             // write above, not the raw client-supplied filePath, so a
             // traversal attempt can't produce a different (and possibly
-            // unsafe) S3 key than the file it actually wrote to.
+            // unsafe) S3 key than the file it actually wrote to. The disk
+            // write above is immediate; only the S3 upload is debounced
+            // (see s3WriteDebouncer.ts) so a burst of edits doesn't fire one
+            // S3 PUT per keystroke.
             const safeRelativePath = "/" + fullPath.slice(WORKSPACE_DIR.length).replace(/^\/+/, "");
-            await saveToS3(`code/${replId}`, safeRelativePath, content);
+            s3WriteDebouncer.schedule(`code/${replId}`, safeRelativePath, content);
         } catch (err) {
             // No ack callback on this event today, so there's nothing to
             // report back to the client - but the process must survive a

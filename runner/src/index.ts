@@ -2,7 +2,7 @@ import dotenv from "dotenv"
 dotenv.config()
 import express from "express";
 import { createServer } from "http";
-import { initWs, terminalManager, getLastActivityAt } from "./ws";
+import { initWs, terminalManager, getLastActivityAt, flushPendingS3Writes } from "./ws";
 import cors from "cors";
 import { autoRunProject } from "./autorun";
 import { syncWorkspaceToS3, withTimeout } from "./sync";
@@ -58,6 +58,10 @@ app.get("/health", requireInternalToken, (req, res) => {
 app.post("/shutdown", requireInternalToken, async (req, res) => {
   console.log("[shutdown] received /shutdown request, syncing workspace to S3");
   try {
+    // Cancel any pending debounced per-file writes first - syncWorkspaceToS3
+    // below re-uploads every file fresh from disk anyway, but this avoids
+    // leaving timers to fire after the process has moved on.
+    await flushPendingS3Writes();
     await withTimeout(syncWorkspaceToS3(process.env.REPL_ID ?? "unknown"), SYNC_TIMEOUT_MS);
     console.log("[shutdown] final sync complete");
     res.status(200).send({ message: "synced" });
@@ -74,6 +78,7 @@ app.post("/shutdown", requireInternalToken, async (req, res) => {
 process.on("SIGTERM", async () => {
   console.log("[shutdown] received SIGTERM, syncing workspace to S3 before exit");
   try {
+    await flushPendingS3Writes();
     await withTimeout(syncWorkspaceToS3(process.env.REPL_ID ?? "unknown"), SYNC_TIMEOUT_MS);
     console.log("[shutdown] final sync complete");
   } catch (err) {
