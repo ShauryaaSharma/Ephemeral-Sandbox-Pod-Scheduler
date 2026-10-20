@@ -227,7 +227,7 @@ Every `<replId>.<domain>` now gets HTTPS automatically, from this one cert.
 
 ## 9. Create the credentials Secret
 
-Generate the ES256 (ECDSA P-256) key pair tokens are signed with (only `init-service` keeps the private half - see README "JWT keys" for why ES256):
+Generate the ES256 (ECDSA P-256) key pair tokens are signed with (only `init-service` keeps the private half - see docs/ARCHITECTURE.md "JWT keys" for why ES256):
 
 ```bash
 openssl ecparam -genkey -name prime256v1 -noout -out jwt-private.pem
@@ -327,7 +327,7 @@ NODE_ENV=production
 ALLOWED_ORIGINS=https://app.yourdomain.com
 ```
 (Both services pointing at the same `OWNERSHIP_DB_PATH` on this one VM's local
-disk is exactly the "shared filesystem" the README calls for — running both
+disk is exactly the "shared filesystem" docs/ARCHITECTURE.md calls for — running both
 services on one machine gets you that for free, no RWX storage needed.)
 
 **Keep both processes running permanently** with `systemd`:
@@ -468,7 +468,7 @@ kubectl logs -n sandbox-<replId> deploy/<replId>
 Everything above is $0/month except the domain registration itself
 (~$10-15/year). The real ceiling isn't a bill — it's Oracle's free-tier capacity
 (2 Ampere OCPUs / 12GB RAM total for the k3s cluster as of mid-2026, 1GB RAM for
-the scheduler VM). `orchestrator-simple`'s capacity check (see README "Cluster
+the scheduler VM). `orchestrator-simple`'s capacity check (see docs/ARCHITECTURE.md "Cluster
 capacity & retries") will correctly return `503` rather than overloading the
 node once you're out of room — that's your signal it's time to add a paid node,
 not a sign something's broken.
