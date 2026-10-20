@@ -15,7 +15,7 @@ A browser-based code editor and terminal, like [Session Multiplexer Code Shell](
    - a **Service** exposing the pod's port `3001` (WebSocket) and `3000` (the user's own running app)
    - an **Ingress** routing `<replId>.<domain>` (two configured hostnames) to those ports
    - a **NetworkPolicy** scoping that pod's ingress/egress (see [Network policy](#network-policy))
-4. **Editing & terminal** : the frontend connects a Socket.IO client directly to `ws://<replId>.<domain>`, presenting its token in the handshake. The `runner` inside that specific pod identifies which project it's serving from the **subdomain in the request's Host header** (not a query param, since there's exactly one project per pod), and rejects the connection unless the token's owner matches the pod's own `OWNER_ID`. File read/write and terminal I/O work the same way as the single-host version, except everything happens inside `/workspace` (the volume the init container populated) rather than a shared local `tmp/` folder.
+4. **Editing & terminal** : the frontend connects a Socket.IO client directly to `ws://<replId>.<domain>`, presenting its token in the handshake. The `runner` inside that specific pod identifies which project it's serving from its own `REPL_ID` env var (injected by the orchestrator at pod-creation time - not the request's Host header, which is client-controlled and not trustworthy for this, and not a query param either, since there's exactly one project per pod), and rejects the connection unless the token's owner matches the pod's own `OWNER_ID`. File read/write and terminal I/O work the same way as the single-host version, except everything happens inside `/workspace` (the volume the init container populated) rather than a shared local `tmp/` folder, and every path is resolved and bounds-checked against `/workspace` before any filesystem or S3 access (see [Path safety](#path-safety)).
 5. **Live preview** : the frontend's Output panel points its iframe at `http://<replId>.<domain>`, which the Ingress routes to the pod's port `3000`. On boot, the runner also auto-detects the project type and runs its install+start command in the background (see [Automatic run step](#automatic-run-step)), so this is usually already live; the user can still run their own commands manually in the terminal too.
 
 ## Architecture
@@ -86,7 +86,7 @@ orchestrator-simple/
 runner/
   src/
     index.ts    # entrypoint — HTTP + WS server for a single pod; GET /health, POST /shutdown
-    ws.ts        # Socket.IO handlers — replId derived from Host header, tracks last-activity
+    ws.ts        # Socket.IO handlers — replId from REPL_ID env, tracks last-activity
     auth.ts      # JWT verify (validates the socket handshake against OWNER_ID)
     autorun.ts   # detects project type in /workspace, auto-runs install+start on pod boot
     sync.ts      # recursively re-syncs /workspace to S3/R2 on /shutdown or SIGTERM
@@ -237,6 +237,7 @@ Everything above runs over plain HTTP. To serve `<replId>.<domain>` over HTTPS, 
 | `INTERNAL_API_TOKEN` | orchestrator-simple, runner | Shared secret gating the runner's internal `/health`/`/shutdown` endpoints - sent as `x-internal-token` by `stop.ts`/`reaper.ts`, checked with `crypto.timingSafeEqual`. **Must be identical in both.** Generate with e.g. `openssl rand -hex 32`. |
 | `ALLOWED_ORIGINS` | init-service, orchestrator-simple, runner | Comma-separated frontend origin(s) allowed by CORS (and, for the runner, the Socket.IO handshake). **Required when `NODE_ENV=production`** (startup fails otherwise); defaults to `http://localhost:5173` in development. `orchestrator-simple` also substitutes its own value into every project pod's `ALLOWED_ORIGINS` at `/start` time - set it once there, not per-service. |
 | `NODE_ENV` | init-service, orchestrator-simple, runner | Standard Node env flag - `production` enforces `ALLOWED_ORIGINS` being set (see above). |
+| `MAX_FILE_UPDATE_BYTES` | runner | Max size accepted for a single `updateContent` (file save) payload. Default `1048576` (1MB); larger payloads are silently dropped (logged, no ack either way today). |
 | `VITE_WS_DOMAIN` / `VITE_APP_DOMAIN` | frontend | Must match `WS_DOMAIN`/`APP_DOMAIN` above. Only need a `.env` at all if your domains differ from the defaults. |
 | `VITE_INIT_SERVICE_URL` / `VITE_ORCHESTRATOR_URL` | frontend | Full base URLs (protocol+host+port) for init-service/orchestrator-simple, wherever you deploy them. Defaults (`http://localhost:3001`/`:3002`) only work when running everything on one machine - **required** for any real deployment, since the frontend runs in the user's browser, not on your server. |
 | `VITE_USE_TLS` | frontend | Set to `"true"` once [TLS via cert-manager](#tls-via-cert-manager) is set up - switches the per-project socket/iframe connections from `ws`/`http` to `wss`/`https`. Default `false`. |
@@ -274,6 +275,12 @@ There is no login/password/email anywhere in this project - adding real user acc
 **This is intentionally a lightweight, anonymous, device-bound identity, not a real auth system** - a token just proves "the same browser that created this project is asking again." Clearing `localStorage` forfeits access to your own projects (no recovery mechanism), and there's no protection against someone deliberately exporting/sharing their token. Swapping in a real identity provider later would only require changing how `/auth/session` issues tokens - everything downstream (the bearer-token middleware, the ownership table, the socket check) stays the same.
 
 **Trade-off on `OWNERSHIP_DB_PATH`:** init-service and orchestrator-simple both read/write the same SQLite file directly rather than one service calling the other's API. That's the lightest option for two services that, today, are expected to run on the same host - but it means they **must** share a filesystem. If you deploy them on separate hosts/containers, either point `OWNERSHIP_DB_PATH` at a shared volume, or (better, for real multi-host deployment) replace the direct file access with a tiny internal ownership API that one service exposes and the other calls.
+
+## Path safety
+
+Every `fetchDir`/`fetchContent`/`updateContent` call goes through `resolveInWorkspace` (`runner/src/fs.ts`) before touching the filesystem: it joins the caller-supplied path onto `/workspace` and rejects the result unless it still resolves inside `/workspace` (e.g. a `../../etc/passwd`-style traversal). `updateContent`'s S3 key is built from that same resolved path, not the raw client-supplied string, so a traversal attempt can't produce a different S3 key than the file it actually wrote to on disk. `updateContent` also rejects payloads over `MAX_FILE_UPDATE_BYTES` (default 1MB).
+
+The runner also no longer trusts the Socket.IO connection's Host header to determine which project it's serving - that header is entirely client-controlled, so a client that could reach the pod directly (bypassing the ingress's subdomain routing) could previously claim to be any project. It now reads its own `REPL_ID` env var instead, injected by the orchestrator at pod-creation time and identical to what every other per-pod identity check (`OWNER_ID`, `/health`, autorun) already relies on.
 
 ## Automatic run step
 
