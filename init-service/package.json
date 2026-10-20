@@ -1,7 +1,9 @@
 {
   "name": "init-service",
   "version": "1.0.0",
+  "description": "Creates projects by copying a base template into S3/R2 and issues anonymous session tokens.",
   "main": "index.js",
+  "author": "Shaurya",
   "license": "MIT",
   "dependencies": {
     "@types/cors": "^2.8.17",

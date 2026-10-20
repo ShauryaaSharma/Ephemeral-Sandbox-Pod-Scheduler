@@ -1,7 +1,9 @@
 {
-  "name": "init-service",
+  "name": "orchestrator-simple",
   "version": "1.0.0",
+  "description": "Schedules per-project Kubernetes resources and manages their lifecycle and health.",
   "main": "index.js",
+  "author": "Shaurya",
   "license": "MIT",
   "dependencies": {
     "@kubernetes/client-node": "^0.20.0",
