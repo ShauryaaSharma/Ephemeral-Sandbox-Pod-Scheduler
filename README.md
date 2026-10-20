@@ -121,7 +121,7 @@ k8s/
 - A Kubernetes cluster you have `kubectl`/API access to, with `nginx-ingress` installed (see `k8s/ingress-controller.yaml`)
 - A domain (or two) with wildcard DNS pointed at your ingress controller's external IP, so `<anything>.yourdomain.com` resolves
 - An S3-compatible bucket — AWS S3 or Cloudflare R2 — with `base/node-js` and `base/python` template folders pre-seeded
-- A container registry to push the `runner` image to (the sample manifest references `100xdevs/runner:latest` — replace with your own)
+- A container registry to push the `runner` image to (the sample manifest references `ghcr.io/shauryaasharma/runner:latest` — replace with your own)
 - Node.js 18+
 - **Optional but recommended**: [`metrics-server`](https://github.com/kubernetes-sigs/metrics-server) installed in your cluster, for `/status`'s per-pod CPU/memory numbers. Without it, resource usage just reports as `null` - everything else still works.
 

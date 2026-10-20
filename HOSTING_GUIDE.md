@@ -251,7 +251,7 @@ export INTERNAL_API_TOKEN=$(openssl rand -hex 32) # save this value — you'll n
 
 Edit `orchestrator-simple/service.yaml`:
 
-- `image: 100xdevs/runner:latest` → `image: ghcr.io/<your-github-username>/runner:latest`
+- `image: ghcr.io/shauryaasharma/runner:latest` → `image: ghcr.io/<your-github-username>/runner:latest`
 - `S3_BUCKET` value → your R2 bucket name
 - `S3_ENDPOINT` value → your R2 endpoint from step 2
 
