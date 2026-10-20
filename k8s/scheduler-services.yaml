@@ -21,6 +21,11 @@ data:
   S3_ENDPOINT: "your-s3-endpoint"
   RATE_LIMIT_MAX: "5"
   RATE_LIMIT_WINDOW_SECONDS: "60"
+  # shared by both - comma-separated frontend origin(s) allowed to call
+  # these APIs; orchestrator-simple also substitutes this into every
+  # project pod's own CORS/Socket.IO origin check (see service.yaml)
+  NODE_ENV: "production"
+  ALLOWED_ORIGINS: "https://your-frontend-domain.example.com"
   # orchestrator-simple only
   # ARN of an IAM role orchestrator-simple can assume to mint per-project S3
   # credentials scoped to code/<replId>/*. Leave blank to keep the legacy

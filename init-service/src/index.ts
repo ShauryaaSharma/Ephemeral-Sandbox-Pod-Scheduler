@@ -7,6 +7,7 @@ import { copyS3Folder } from "./aws";
 import { requireAuth, signToken } from "./auth";
 import { createProject, getProject } from "./db";
 import { rateLimit } from "./rateLimit";
+import { ALLOWED_ORIGINS } from "./corsOrigins";
 
 // Express 4 doesn't catch a rejected async route handler for you - an
 // unguarded await that throws becomes an unhandled rejection, which Node
@@ -20,7 +21,7 @@ process.on("unhandledRejection", (reason) => {
 
 const app = express();
 app.use(express.json());
-app.use(cors())
+app.use(cors({ origin: ALLOWED_ORIGINS }))
 
 // Bootstraps an anonymous, device-bound identity - there's no login/password
 // in this project. The frontend calls this once, caches the token, and sends

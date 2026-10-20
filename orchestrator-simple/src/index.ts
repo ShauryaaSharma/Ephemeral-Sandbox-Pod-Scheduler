@@ -16,6 +16,7 @@ import { ensureNamespace, deleteProjectNamespace } from "./namespace";
 import { withRetry, checkPodSchedulable, translateK8sError } from "./capacity";
 import { rateLimit } from "./rateLimit";
 import { assumeRoleForProject, isStsEnabled, writeProjectCredentialsSecret, PROJECT_CREDENTIALS_SECRET_NAME } from "./sts";
+import { ALLOWED_ORIGINS } from "./corsOrigins";
 
 // Express 4 doesn't catch a rejected async route handler for you - an
 // unguarded await that throws becomes an unhandled rejection, which Node
@@ -29,7 +30,7 @@ process.on("unhandledRejection", (reason) => {
 
 const app = express();
 app.use(express.json());
-app.use(cors());
+app.use(cors({ origin: ALLOWED_ORIGINS }));
 
 // Config-driven instead of baked into the committed service.yaml template -
 // WS_DOMAIN also has to match what runner/frontend use to reach a pod (see
@@ -110,6 +111,8 @@ app.post("/start", requireAuth, rateLimit, async (req, res) => {
             aws_credentials_secret_placeholder: awsCredentialsSecretName,
             workspace_storage_request_placeholder: WORKSPACE_STORAGE_REQUEST,
             workspace_storage_limit_placeholder: WORKSPACE_STORAGE_LIMIT,
+            allowed_origins_placeholder: ALLOWED_ORIGINS.join(","),
+            node_env_placeholder: process.env.NODE_ENV ?? "development",
         });
         for (const manifest of kubeManifests) {
             switch (manifest.kind) {

@@ -305,6 +305,8 @@ AWS_SECRET_ACCESS_KEY=<your-r2-secret-access-key>
 S3_ENDPOINT=<your-r2-endpoint>
 JWT_PRIVATE_KEY=<contents of jwt-private.pem from step 9, with newlines escaped as \n>
 OWNERSHIP_DB_PATH=/home/ubuntu/data/ownership.db
+NODE_ENV=production
+ALLOWED_ORIGINS=https://app.yourdomain.com
 ```
 
 **orchestrator-simple**:
@@ -321,6 +323,8 @@ INTERNAL_API_TOKEN=<same value from step 9>
 OWNERSHIP_DB_PATH=/home/ubuntu/data/ownership.db
 WS_DOMAIN=ws.yourdomain.com
 APP_DOMAIN=apps.yourdomain.com
+NODE_ENV=production
+ALLOWED_ORIGINS=https://app.yourdomain.com
 ```
 (Both services pointing at the same `OWNERSHIP_DB_PATH` on this one VM's local
 disk is exactly the "shared filesystem" the README calls for — running both

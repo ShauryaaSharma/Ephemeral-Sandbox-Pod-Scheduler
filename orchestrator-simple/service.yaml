@@ -146,6 +146,15 @@ spec:
                 secretKeyRef:
                   name: sandbox-secrets
                   key: INTERNAL_API_TOKEN
+            # Every project's Socket.IO/HTTP origin check must allow the one
+            # configured frontend origin, not a per-project value - these are
+            # substituted from orchestrator-simple's own ALLOWED_ORIGINS/
+            # NODE_ENV (see corsOrigins.ts/index.ts), the same source of truth
+            # its own CORS check uses.
+            - name: ALLOWED_ORIGINS
+              value: "allowed_origins_placeholder"
+            - name: NODE_ENV
+              value: "node_env_placeholder"
             - name: S3_BUCKET
               value: "your-bucket-name"
             - name: S3_ENDPOINT

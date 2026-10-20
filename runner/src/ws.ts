@@ -5,6 +5,7 @@ import path from "path";
 import { fetchDir, fetchFileContent, saveFile } from "./fs";
 import { TerminalManager } from "./pty";
 import { verifyToken } from "./auth";
+import { ALLOWED_ORIGINS } from "./corsOrigins";
 
 // Shared with autorun.ts so the auto-started project process lives in the
 // same registry as user-opened terminal sessions.
@@ -26,8 +27,10 @@ function touch() {
 export function initWs(httpServer: HttpServer) {
     const io = new Server(httpServer, {
         cors: {
-            // Should restrict this more!
-            origin: "*",
+            // Every project's subdomain is dynamic (<replId>.<WS_DOMAIN>), but
+            // the browser origin actually making this connection is always the
+            // one configured frontend origin - not a per-project value.
+            origin: ALLOWED_ORIGINS,
             methods: ["GET", "POST"],
         },
     });

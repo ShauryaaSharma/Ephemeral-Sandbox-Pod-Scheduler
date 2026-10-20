@@ -7,6 +7,7 @@ import cors from "cors";
 import { autoRunProject } from "./autorun";
 import { syncWorkspaceToS3, withTimeout } from "./sync";
 import { isValidInternalToken } from "./internalAuth";
+import { ALLOWED_ORIGINS } from "./corsOrigins";
 
 const INTERNAL_API_TOKEN = process.env.INTERNAL_API_TOKEN;
 if (!INTERNAL_API_TOKEN) {
@@ -25,7 +26,7 @@ process.on("unhandledRejection", (reason) => {
 });
 
 const app = express();
-app.use(cors());
+app.use(cors({ origin: ALLOWED_ORIGINS }));
 app.use(express.json());
 const httpServer = createServer(app);
 
