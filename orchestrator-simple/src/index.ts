@@ -19,6 +19,7 @@ import { assumeRoleForProject, isStsEnabled, writeProjectCredentialsSecret, PROJ
 import { writePodTokenSecret } from "./internalToken";
 import { ALLOWED_ORIGINS } from "./corsOrigins";
 import { isValidReplId } from "./validators";
+import { logger } from "./logger";
 
 // Express 4 doesn't catch a rejected async route handler for you - an
 // unguarded await that throws becomes an unhandled rejection, which Node
@@ -92,7 +93,10 @@ const readAndParseKubeYaml = (filePath: string, substitutions: Record<string, st
             const regex = new RegExp(placeholder, 'g');
             docString = docString.replace(regex, value);
         }
-        console.log(docString);
+        // Debug-only: this is the fully-substituted manifest for a project
+        // pod, including its OWNER_ID - not something to print at the
+        // default log level.
+        logger.debug(docString);
         return yaml.parse(docString);
     });
     return docs;

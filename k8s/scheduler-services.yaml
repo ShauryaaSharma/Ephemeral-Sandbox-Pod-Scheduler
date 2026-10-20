@@ -31,7 +31,15 @@ data:
   # credentials scoped to code/<replId>/*. Leave blank to keep the legacy
   # bucket-wide-credentials fallback (see README "Scoped S3 credentials").
   AWS_STS_ROLE_ARN: ""
-  AWS_STS_SESSION_DURATION_SECONDS: "3600"
+  # Matches MAX_PROJECT_LIFETIME_HOURS below (12h) - see README "Scoped S3
+  # credentials" and docs/ROADMAP.md. On IRSA, role chaining caps this at
+  # 3600 regardless.
+  AWS_STS_SESSION_DURATION_SECONDS: "43200"
+  MAX_PROJECT_LIFETIME_HOURS: "12"
+  # debug|info|warn|error (default: info) - orchestrator-simple only. debug
+  # also prints every project pod's fully-substituted manifest at /start
+  # time, including its OWNER_ID - leave at info in production.
+  LOG_LEVEL: "info"
   WS_DOMAIN: "peetcode.com"
   APP_DOMAIN: "autogpt-cloud.com"
   IDLE_TIMEOUT_MINUTES: "15"

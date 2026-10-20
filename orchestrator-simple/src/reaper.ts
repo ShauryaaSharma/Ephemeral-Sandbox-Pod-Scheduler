@@ -87,9 +87,12 @@ export async function reapOnce(stopProject: StopProjectFn): Promise<void> {
         if (idleMs > IDLE_TIMEOUT_MS || lifetimeExceeded) {
             const idleMinutes = Math.round(idleMs / 60000);
             const reason: TeardownEvent["reason"] = lifetimeExceeded ? "max-lifetime" : "idle";
-            console.log(
-                `[reaper] AUTO-TEARDOWN ${project.replId} (owner ${project.ownerId}) - reason=${reason} idle ${idleMinutes}min`
-            );
+            // ownerId deliberately left out of this line - it already
+            // reaches the project's own owner (and an admin) through the
+            // access-controlled recentTeardowns event pushed below, not
+            // through unstructured stdout logs anyone with cluster log
+            // access could read.
+            console.log(`[reaper] AUTO-TEARDOWN ${project.replId} - reason=${reason} idle ${idleMinutes}min`);
             try {
                 await stopProject(project.replId);
                 console.log(`[reaper] AUTO-TEARDOWN complete for ${project.replId}`);
