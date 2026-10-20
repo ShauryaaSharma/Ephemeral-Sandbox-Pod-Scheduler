@@ -32,7 +32,7 @@ Every backend address is centralized in [`src/lib/config.ts`](src/lib/config.ts)
 2. `Landing.tsx` sends that token as a bearer token to `init-service`'s `POST /project` to create a project.
 3. `CodingPage.tsx` sends it to `orchestrator-simple`'s `POST /start` to schedule the project's pod, then connects a Socket.IO client directly to `<replId>.<VITE_WS_DOMAIN>` (presenting the token in the handshake) for the editor/terminal, and points the `Output.tsx` iframe at `<replId>.<VITE_APP_DOMAIN>` for the running app preview.
 
-See the root [README](../README.md#how-it-works) for the full request flow across all services.
+See [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md#how-it-works) for the full request flow across all services.
 
 ## Build & deploy
 
