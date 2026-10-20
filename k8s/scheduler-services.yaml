@@ -140,6 +140,12 @@ spec:
                 name: scheduler-config
             - secretRef:
                 name: sandbox-secrets
+            # INTERNAL_API_MASTER_KEY - only orchestrator-simple ever derives
+            # per-project tokens from this (see src/internalToken.ts), so
+            # only its deployment gets this secretRef (see
+            # k8s/create-secret.sh). Never copied into a project namespace.
+            - secretRef:
+                name: orchestrator-secrets
           volumeMounts:
             - name: ownership-db
               mountPath: /data

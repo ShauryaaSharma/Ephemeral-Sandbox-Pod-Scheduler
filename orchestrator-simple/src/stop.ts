@@ -2,20 +2,13 @@ import axios from "axios";
 import { CoreV1Api } from "@kubernetes/client-node";
 import { markStopped } from "./db";
 import { deleteProjectNamespace } from "./namespace";
+import { derivePodToken } from "./internalToken";
 
 // Must match the ws-facing Ingress host in service.yaml (`<replId>.<WS_DOMAIN>`)
 // so this can reach the pod's Express app through the ingress controller -
 // orchestrator-simple has no direct network path to pods otherwise.
 const WS_DOMAIN = process.env.WS_DOMAIN ?? "peetcode.com";
 const SHUTDOWN_TIMEOUT_MS = 10_000;
-
-// Gates the runner's /shutdown (see runner/src/index.ts) - without this
-// header, any caller reaching a pod's public ingress host could force an
-// early resync.
-const INTERNAL_API_TOKEN = process.env.INTERNAL_API_TOKEN;
-if (!INTERNAL_API_TOKEN) {
-    throw new Error("INTERNAL_API_TOKEN environment variable is required");
-}
 
 interface K8sApis {
     coreV1Api: CoreV1Api;
@@ -28,7 +21,11 @@ export function createStopper(apis: K8sApis) {
         try {
             await axios.post(`http://${replId}.${WS_DOMAIN}/shutdown`, {}, {
                 timeout: SHUTDOWN_TIMEOUT_MS,
-                headers: { "x-internal-token": INTERNAL_API_TOKEN },
+                // Recomputed from the master key on every call - gates the
+                // runner's /shutdown (see runner/src/index.ts). Without
+                // this header, any caller reaching a pod's public ingress
+                // host could force an early resync.
+                headers: { "x-internal-token": derivePodToken(replId) },
             });
         } catch (err) {
             console.warn(

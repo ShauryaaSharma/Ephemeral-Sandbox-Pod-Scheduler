@@ -1,20 +1,13 @@
 import axios from "axios";
 import { getStartedProjects, updateLastActive } from "./db";
 import { StopProjectFn } from "./stop";
+import { derivePodToken } from "./internalToken";
 
 const IDLE_TIMEOUT_MS = (Number(process.env.IDLE_TIMEOUT_MINUTES) || 15) * 60 * 1000;
 const REAP_INTERVAL_MS = (Number(process.env.REAPER_INTERVAL_SECONDS) || 60) * 1000;
 const WS_DOMAIN = process.env.WS_DOMAIN ?? "peetcode.com";
 const HEALTH_CHECK_TIMEOUT_MS = 5000;
 const MAX_TEARDOWN_EVENTS = 50;
-
-// Gates the runner's /health (see runner/src/index.ts) - without this
-// header, any caller reaching a pod's public ingress host could read its
-// last-activity timestamp.
-const INTERNAL_API_TOKEN = process.env.INTERNAL_API_TOKEN;
-if (!INTERNAL_API_TOKEN) {
-    throw new Error("INTERNAL_API_TOKEN environment variable is required");
-}
 
 export interface TeardownEvent {
     replId: string;
@@ -54,7 +47,11 @@ export async function reapOnce(stopProject: StopProjectFn): Promise<void> {
         try {
             const { data } = await axios.get(`http://${project.replId}.${WS_DOMAIN}/health`, {
                 timeout: HEALTH_CHECK_TIMEOUT_MS,
-                headers: { "x-internal-token": INTERNAL_API_TOKEN },
+                // Recomputed from the master key on every call - gates the
+                // runner's /health (see runner/src/index.ts). Without this
+                // header, any caller reaching a pod's public ingress host
+                // could read its last-activity timestamp.
+                headers: { "x-internal-token": derivePodToken(project.replId) },
             });
             if (typeof data.lastActivityAt === "number") {
                 lastActiveAt = new Date(data.lastActivityAt).toISOString();

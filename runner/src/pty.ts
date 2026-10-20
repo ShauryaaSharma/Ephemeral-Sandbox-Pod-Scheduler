@@ -4,6 +4,18 @@ import { buildShellEnv } from "./shellEnv";
 
 const SHELL = "bash";
 
+// Unset (the default) outside a real pod - plain local dev has no
+// privilege to switch uid/gid and shouldn't need to. In the pod, set to
+// 1001/1000 (service.yaml) - a different uid than the runner process
+// itself (which runs as uid 0 with only CAP_SETUID/CAP_SETGID kept, see
+// README "Per-pod internal token & process isolation"), so the user's own
+// shell can no longer read the runner's /proc/<pid>/environ: same-uid is
+// one of the two ways Linux grants that read, and the runner process no
+// longer has the other (CAP_SYS_PTRACE - dropped along with every
+// capability except the two needed to make this uid switch happen).
+const SHELL_UID = process.env.SANDBOX_SHELL_UID ? Number(process.env.SANDBOX_SHELL_UID) : undefined;
+const SHELL_GID = process.env.SANDBOX_SHELL_GID ? Number(process.env.SANDBOX_SHELL_GID) : undefined;
+
 export class TerminalManager {
     private sessions: { [id: string]: {terminal: IPty, replId: string;} } = {};
     private cwd: string;
@@ -22,7 +34,10 @@ export class TerminalManager {
             cwd: this.cwd,
             // Whitelisted, not the pod's full process.env - see shellEnv.ts.
             // Also covers autorun.ts, which spawns through this same method.
-            env: buildShellEnv()
+            env: buildShellEnv(),
+            // Also covers autorun.ts - see the SHELL_UID/SHELL_GID comment above.
+            uid: SHELL_UID,
+            gid: SHELL_GID
         });
 
         term.onData((data: string) => onData(data, term.pid));
