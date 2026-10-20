@@ -148,16 +148,26 @@ The Ingress hostnames are **not** edited directly anymore - `ws_domain_placehold
 
 ### 3. Create the credentials Secret
 
-Real credentials no longer live in `service.yaml` — they're read from a Kubernetes `Secret` at pod-creation time via `secretKeyRef`. Create it with the provided script (never commit the filled-in values):
+Real credentials no longer live in `service.yaml` — they're read from Kubernetes `Secret`s at pod-creation time via `secretKeyRef`/`secretRef`.
+
+**Generating the JWT key pair**: session tokens are signed with an asymmetric RS256 key pair, not a shared symmetric secret — only `init-service` ever holds the private key; `orchestrator-simple` and `runner` only get the public key and can only verify tokens, never mint them.
+
+```bash
+openssl genrsa -out jwt-private.pem 2048
+openssl rsa -in jwt-private.pem -pubout -out jwt-public.pem
+```
+
+Then create both Secrets with the provided script (never commit the filled-in values or the `.pem` files):
 
 ```bash
 export AWS_ACCESS_KEY_ID=...
 export AWS_SECRET_ACCESS_KEY=...
-export JWT_SECRET=$(openssl rand -hex 32)   # must be the same value used by init-service/orchestrator-simple below
+export JWT_PRIVATE_KEY="$(cat jwt-private.pem)"
+export JWT_PUBLIC_KEY="$(cat jwt-public.pem)"
 ./k8s/create-secret.sh   # defaults to the "default" namespace; pass one as an arg otherwise
 ```
 
-This creates a single `sandbox-secrets` Secret with `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `JWT_SECRET` keys, referenced by both the init container and the `runner` container in `service.yaml`.
+This creates a `sandbox-secrets` Secret with `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `JWT_PUBLIC_KEY` keys (copied into every project namespace and referenced by the `runner` container), and a separate `init-service-secrets` Secret with `JWT_PRIVATE_KEY` (referenced only by `init-service`'s own deployment in `k8s/scheduler-services.yaml` — never copied into a project namespace).
 
 ### 4. Install the ingress controller
 
@@ -167,7 +177,7 @@ kubectl apply -f k8s/ingress-controller.yaml
 
 ### 5. Run the services
 
-`init-service` and `orchestrator-simple` both need the **same** `JWT_SECRET` (used to sign/verify anonymous session tokens) and the **same** `OWNERSHIP_DB_PATH` (a shared SQLite file recording which user owns which `replId` — see [Auth & ownership](#auth--ownership)).
+`init-service` needs `JWT_PRIVATE_KEY` (to sign anonymous session tokens); `orchestrator-simple` needs the matching `JWT_PUBLIC_KEY` (to verify them) — see [Generating the JWT key pair](#3-create-the-credentials-secret). Both also need the **same** `OWNERSHIP_DB_PATH` (a shared SQLite file recording which user owns which `replId` — see [Auth & ownership](#auth--ownership)).
 
 **Note the copy destination below**: `dotenv.config()` loads `.env` from the process's working directory (i.e. the service root when you run `npm run dev` from there), *not* from `src/`, even though the template lives at `src/.env.example`. Copying it to `src/.env` (an easy mistake - the original version of this README did exactly that) means none of these variables actually load.
 
@@ -175,13 +185,13 @@ kubectl apply -f k8s/ingress-controller.yaml
 # init-service
 cd init-service
 npm install
-cp src/.env.example .env   # fill in S3_BUCKET, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, S3_ENDPOINT, JWT_SECRET, OWNERSHIP_DB_PATH
+cp src/.env.example .env   # fill in S3_BUCKET, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, S3_ENDPOINT, JWT_PRIVATE_KEY, OWNERSHIP_DB_PATH
 npm run dev                     # :3001
 
 # orchestrator-simple
 cd orchestrator-simple
 npm install
-cp src/.env.example .env   # same JWT_SECRET and OWNERSHIP_DB_PATH as init-service
+cp src/.env.example .env   # JWT_PUBLIC_KEY matching init-service's JWT_PRIVATE_KEY, same OWNERSHIP_DB_PATH
 npm run dev                     # :3002 — needs kubeconfig access to your cluster (loadFromDefault())
 ```
 
@@ -209,7 +219,8 @@ Everything above runs over plain HTTP. To serve `<replId>.<domain>` over HTTPS, 
 | `S3_ENDPOINT` | init-service, runner | Override for S3-compatible storage (e.g. Cloudflare R2) |
 | `PORT` | init-service, orchestrator-simple, runner | Service port (defaults: `3001`, `3002`, `3001`) |
 | `REPL_ID` | runner | The project's `replId`, injected by the orchestrator via the same `service_name` substitution used elsewhere in `service.yaml`. Used to label the auto-run terminal session in logs. |
-| `JWT_SECRET` | init-service, orchestrator-simple, runner | Shared HMAC secret for signing/verifying anonymous session tokens. **Must be identical across all three services.** Generate with e.g. `openssl rand -hex 32`. |
+| `JWT_PRIVATE_KEY` | init-service | RS256 private key (PEM) used to **sign** anonymous session tokens. Only init-service has this. See [Generating the JWT key pair](#3-create-the-credentials-secret). |
+| `JWT_PUBLIC_KEY` | orchestrator-simple, runner | RS256 public key (PEM) used to **verify** tokens signed by `JWT_PRIVATE_KEY`. Neither service can mint tokens with this. |
 | `OWNER_ID` | runner | The verified owner's user id, injected by the orchestrator at pod-creation time (from the ownership row it already checked in `POST /start`). The runner's socket handshake rejects any token whose `userId` doesn't match this. |
 | `OWNERSHIP_DB_PATH` | init-service, orchestrator-simple | Path to the shared SQLite file mapping `replId` → owning user. Defaults to `<repo root>/data/ownership.db`, which only works if both services run on the same host/volume - see the trade-off note below. |
 | `WS_DOMAIN` / `APP_DOMAIN` | orchestrator-simple | The two domains projects are reachable at - `<replId>.<WS_DOMAIN>` for the terminal/editor socket (default `peetcode.com`), `<replId>.<APP_DOMAIN>` for the user's running app (default `autogpt-cloud.com`). Substituted into `service.yaml`'s Ingress at `/start` time; `WS_DOMAIN` is also used directly to reach a pod's `/shutdown`/`/health`. See [Configurable domains](#configurable-domains). |
@@ -248,7 +259,7 @@ Everything above runs over plain HTTP. To serve `<replId>.<domain>` over HTTPS, 
 
 There is no login/password/email anywhere in this project - adding real user accounts was out of scope. Instead:
 
-1. On first load, the frontend calls `POST /auth/session` on `init-service` (no auth required - this **is** the bootstrap), which generates a random `userId` (`crypto.randomUUID()`), signs a JWT `{ userId }`, and returns it. The frontend caches this token in `localStorage` and sends it as `Authorization: Bearer <token>` on `/project` and `/start`, and as `{ auth: { token } }` on the Socket.IO connection to the pod.
+1. On first load, the frontend calls `POST /auth/session` on `init-service` (no auth required - this **is** the bootstrap), which generates a random `userId` (`crypto.randomUUID()`), signs a JWT `{ userId }` with its `JWT_PRIVATE_KEY` (RS256), and returns it. The frontend caches this token in `localStorage` and sends it as `Authorization: Bearer <token>` on `/project` and `/start`, and as `{ auth: { token } }` on the Socket.IO connection to the pod. `orchestrator-simple` and the `runner` pod only ever hold the matching `JWT_PUBLIC_KEY` and can verify a token but never mint one.
 2. `POST /project` (init-service) requires a valid bearer token, rejects a `replId` that's already taken (409), and records `(replId, ownerId, createdAt)` in a shared SQLite table.
 3. `POST /start` (orchestrator-simple) requires a valid bearer token, looks up the `replId`'s owner, and rejects with `404` if the project doesn't exist or `403` if the caller isn't the owner. On success, it injects the verified `ownerId` into the pod as `OWNER_ID` (same substitution mechanism as `REPL_ID`) - no DB access needed inside the pod itself.
 4. The runner's Socket.IO connection handler verifies the token in the handshake (`socket.handshake.auth.token`) and disconnects unless the token's `userId` matches the pod's own `OWNER_ID`.

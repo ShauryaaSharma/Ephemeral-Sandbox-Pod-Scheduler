@@ -227,12 +227,20 @@ Every `<replId>.<domain>` now gets HTTPS automatically, from this one cert.
 
 ## 9. Create the credentials Secret
 
-Using the R2 credentials from step 2:
+Generate the RS256 key pair tokens are signed with (only `init-service` keeps the private half):
+
+```bash
+openssl genrsa -out jwt-private.pem 2048
+openssl rsa -in jwt-private.pem -pubout -out jwt-public.pem
+```
+
+Using the R2 credentials from step 2 and the key pair above:
 
 ```bash
 export AWS_ACCESS_KEY_ID=<your-r2-access-key-id>
 export AWS_SECRET_ACCESS_KEY=<your-r2-secret-access-key>
-export JWT_SECRET=$(openssl rand -hex 32)   # save this value — you'll need it again in step 11
+export JWT_PRIVATE_KEY="$(cat jwt-private.pem)"   # save jwt-private.pem — you'll need it again in step 11
+export JWT_PUBLIC_KEY="$(cat jwt-public.pem)"     # save jwt-public.pem — you'll need it again in step 11
 ./k8s/create-secret.sh
 ```
 
@@ -294,7 +302,7 @@ S3_BUCKET=<your-r2-bucket>
 AWS_ACCESS_KEY_ID=<your-r2-access-key-id>
 AWS_SECRET_ACCESS_KEY=<your-r2-secret-access-key>
 S3_ENDPOINT=<your-r2-endpoint>
-JWT_SECRET=<same value from step 9>
+JWT_PRIVATE_KEY=<contents of jwt-private.pem from step 9, with newlines escaped as \n>
 OWNERSHIP_DB_PATH=/home/ubuntu/data/ownership.db
 ```
 
@@ -307,7 +315,7 @@ cp src/.env.example .env
 ```
 Fill in `.env`:
 ```
-JWT_SECRET=<same value as init-service, above>
+JWT_PUBLIC_KEY=<contents of jwt-public.pem from step 9, with newlines escaped as \n>
 OWNERSHIP_DB_PATH=/home/ubuntu/data/ownership.db
 WS_DOMAIN=ws.yourdomain.com
 APP_DOMAIN=apps.yourdomain.com

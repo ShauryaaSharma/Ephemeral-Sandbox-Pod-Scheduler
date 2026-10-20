@@ -79,11 +79,11 @@ spec:
                 secretKeyRef:
                   name: sandbox-secrets
                   key: AWS_SECRET_ACCESS_KEY
-            - name: JWT_SECRET
+            - name: JWT_PUBLIC_KEY
               valueFrom:
                 secretKeyRef:
                   name: sandbox-secrets
-                  key: JWT_SECRET
+                  key: JWT_PUBLIC_KEY
             - name: S3_BUCKET
               value: "your-bucket-name"
             - name: S3_ENDPOINT
