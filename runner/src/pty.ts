@@ -1,5 +1,4 @@
-//@ts-ignore => someone fix this
-import { fork, IPty } from 'node-pty';
+import { spawn, IPty } from 'node-pty';
 import path from "path";
 import { buildShellEnv } from "./shellEnv";
 
@@ -17,7 +16,7 @@ export class TerminalManager {
     }
 
     createPty(id: string, replId: string, onData: (data: string, id: number) => void) {
-        let term = fork(SHELL, [], {
+        let term = spawn(SHELL, [], {
             cols: 100,
             name: 'xterm',
             cwd: this.cwd,
@@ -26,14 +25,14 @@ export class TerminalManager {
             env: buildShellEnv()
         });
 
-        term.on('data', (data: string) => onData(data, term.pid));
+        term.onData((data: string) => onData(data, term.pid));
         this.sessions[id] = {
             terminal: term,
             replId
         };
         // Sessions are keyed by the caller-supplied `id` (e.g. socket.id), not
         // by the OS pid, so cleanup on natural exit must use the same key.
-        term.on('exit', () => {
+        term.onExit(() => {
             delete this.sessions[id];
         });
         return term;
