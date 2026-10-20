@@ -8,7 +8,10 @@ export const PROJECT_CREDENTIALS_SECRET_NAME = "sandbox-project-credentials";
 
 const AWS_STS_ROLE_ARN = process.env.AWS_STS_ROLE_ARN;
 const S3_BUCKET = process.env.S3_BUCKET ?? "";
-const SESSION_DURATION_SECONDS = Number(process.env.AWS_STS_SESSION_DURATION_SECONDS) || 3600;
+// 12h default - see README "Scoped S3 credentials" and "MAX_PROJECT_LIFETIME_HOURS"
+// (reaper.ts force-stops a project 15min before this expires, regardless of
+// activity, so the STS session never actually runs out mid-use).
+const SESSION_DURATION_SECONDS = Number(process.env.AWS_STS_SESSION_DURATION_SECONDS) || 43200;
 
 if (!AWS_STS_ROLE_ARN) {
     // eslint-disable-next-line no-console

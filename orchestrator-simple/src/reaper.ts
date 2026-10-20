@@ -8,12 +8,20 @@ const REAP_INTERVAL_MS = (Number(process.env.REAPER_INTERVAL_SECONDS) || 60) * 1
 const WS_DOMAIN = process.env.WS_DOMAIN ?? "peetcode.com";
 const HEALTH_CHECK_TIMEOUT_MS = 5000;
 const MAX_TEARDOWN_EVENTS = 50;
+// A project's STS session credentials (see sts.ts) expire
+// AWS_STS_SESSION_DURATION_SECONDS after /start, regardless of activity -
+// force a normal stop (final sync included) 15 minutes before that, so
+// nothing is ever caught mid-write with expired credentials. Same default
+// (12h) as the STS session itself; override together if you change one.
+const MAX_PROJECT_LIFETIME_MS = (Number(process.env.MAX_PROJECT_LIFETIME_HOURS) || 12) * 60 * 60 * 1000;
+const LIFETIME_SAFETY_MARGIN_MS = 15 * 60 * 1000;
 
 export interface TeardownEvent {
     replId: string;
     ownerId: string;
     idleMinutes: number;
     timestamp: string;
+    reason: "idle" | "max-lifetime";
 }
 
 const recentTeardowns: TeardownEvent[] = [];
@@ -70,9 +78,18 @@ export async function reapOnce(stopProject: StopProjectFn): Promise<void> {
         const referenceTime = lastActiveAt ?? project.createdAt;
         const idleMs = Date.now() - new Date(referenceTime).getTime();
 
-        if (idleMs > IDLE_TIMEOUT_MS) {
+        // Checked regardless of activity - an actively-used project still
+        // gets stopped here, since its STS credentials (if STS is enabled)
+        // expire on a wall-clock schedule from /start, not from idleness.
+        const ageMs = project.startedAt ? Date.now() - new Date(project.startedAt).getTime() : 0;
+        const lifetimeExceeded = ageMs > MAX_PROJECT_LIFETIME_MS - LIFETIME_SAFETY_MARGIN_MS;
+
+        if (idleMs > IDLE_TIMEOUT_MS || lifetimeExceeded) {
             const idleMinutes = Math.round(idleMs / 60000);
-            console.log(`[reaper] AUTO-TEARDOWN ${project.replId} (owner ${project.ownerId}) - idle ${idleMinutes}min`);
+            const reason: TeardownEvent["reason"] = lifetimeExceeded ? "max-lifetime" : "idle";
+            console.log(
+                `[reaper] AUTO-TEARDOWN ${project.replId} (owner ${project.ownerId}) - reason=${reason} idle ${idleMinutes}min`
+            );
             try {
                 await stopProject(project.replId);
                 console.log(`[reaper] AUTO-TEARDOWN complete for ${project.replId}`);
@@ -81,6 +98,7 @@ export async function reapOnce(stopProject: StopProjectFn): Promise<void> {
                     ownerId: project.ownerId,
                     idleMinutes,
                     timestamp: new Date().toISOString(),
+                    reason,
                 });
                 if (recentTeardowns.length > MAX_TEARDOWN_EVENTS) recentTeardowns.shift();
             } catch (err) {
