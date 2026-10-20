@@ -150,11 +150,11 @@ The Ingress hostnames are **not** edited directly anymore - `ws_domain_placehold
 
 Real credentials no longer live in `service.yaml` — they're read from Kubernetes `Secret`s at pod-creation time via `secretKeyRef`/`secretRef`.
 
-**Generating the JWT key pair**: session tokens are signed with an asymmetric RS256 key pair, not a shared symmetric secret — only `init-service` ever holds the private key; `orchestrator-simple` and `runner` only get the public key and can only verify tokens, never mint them.
+**Generating the JWT key pair**: session tokens are signed with an asymmetric ES256 (ECDSA P-256) key pair, not a shared symmetric secret — only `init-service` ever holds the private key; `orchestrator-simple` and `runner` only get the public key and can only verify tokens, never mint them. See [JWT keys](#jwt-keys) below for why ES256 and not EdDSA, and for rotating keys later without logging every user out.
 
 ```bash
-openssl genrsa -out jwt-private.pem 2048
-openssl rsa -in jwt-private.pem -pubout -out jwt-public.pem
+openssl ecparam -genkey -name prime256v1 -noout -out jwt-private.pem
+openssl ec -in jwt-private.pem -pubout -out jwt-public.pem
 ```
 
 Then create both Secrets with the provided script (never commit the filled-in values or the `.pem` files):
@@ -219,8 +219,9 @@ Everything above runs over plain HTTP. To serve `<replId>.<domain>` over HTTPS, 
 | `S3_ENDPOINT` | init-service, runner | Override for S3-compatible storage (e.g. Cloudflare R2) |
 | `PORT` | init-service, orchestrator-simple, runner | Service port (defaults: `3001`, `3002`, `3001`) |
 | `REPL_ID` | runner | The project's `replId`, injected by the orchestrator via the same `service_name` substitution used elsewhere in `service.yaml`. Used to label the auto-run terminal session in logs. |
-| `JWT_PRIVATE_KEY` | init-service | RS256 private key (PEM) used to **sign** anonymous session tokens. Only init-service has this. See [Generating the JWT key pair](#3-create-the-credentials-secret). |
-| `JWT_PUBLIC_KEY` | orchestrator-simple, runner | RS256 public key (PEM) used to **verify** tokens signed by `JWT_PRIVATE_KEY`. Neither service can mint tokens with this. |
+| `JWT_PRIVATE_KEY` | init-service | ES256 (ECDSA P-256) private key (PEM) used to **sign** anonymous session tokens. Only init-service has this. See [JWT keys](#jwt-keys). |
+| `JWT_PUBLIC_KEY` | orchestrator-simple, runner | ES256 public key (PEM) used to **verify** tokens signed by `JWT_PRIVATE_KEY`. Neither service can mint tokens with this. |
+| `JWT_PUBLIC_KEY_PREVIOUS` | orchestrator-simple, runner | Optional previous public key, accepted alongside `JWT_PUBLIC_KEY` during a key rotation so already-issued tokens don't suddenly stop working. See [Rotating JWT keys](#jwt-keys). |
 | `OWNER_ID` | runner | The verified owner's user id, injected by the orchestrator at pod-creation time (from the ownership row it already checked in `POST /start`). The runner's socket handshake rejects any token whose `userId` doesn't match this. |
 | `OWNERSHIP_DB_PATH` | init-service, orchestrator-simple | Path to the shared SQLite file mapping `replId` → owning user. Defaults to `<repo root>/data/ownership.db`, which only works if both services run on the same host/volume - see the trade-off note below. |
 | `WS_DOMAIN` / `APP_DOMAIN` | orchestrator-simple | The two domains projects are reachable at - `<replId>.<WS_DOMAIN>` for the terminal/editor socket (default `peetcode.com`), `<replId>.<APP_DOMAIN>` for the user's running app (default `autogpt-cloud.com`). Substituted into `service.yaml`'s Ingress at `/start` time; `WS_DOMAIN` is also used directly to reach a pod's `/shutdown`/`/health`. See [Configurable domains](#configurable-domains). |
@@ -269,7 +270,7 @@ Everything above runs over plain HTTP. To serve `<replId>.<domain>` over HTTPS, 
 
 There is no login/password/email anywhere in this project - adding real user accounts was out of scope. Instead:
 
-1. On first load, the frontend calls `POST /auth/session` on `init-service` (no auth required - this **is** the bootstrap), which generates a random `userId` (`crypto.randomUUID()`), signs a JWT `{ userId }` with its `JWT_PRIVATE_KEY` (RS256), and returns it. The frontend caches this token in `localStorage` and sends it as `Authorization: Bearer <token>` on `/project` and `/start`, and as `{ auth: { token } }` on the Socket.IO connection to the pod. `orchestrator-simple` and the `runner` pod only ever hold the matching `JWT_PUBLIC_KEY` and can verify a token but never mint one.
+1. On first load, the frontend calls `POST /auth/session` on `init-service` (no auth required - this **is** the bootstrap), which generates a random `userId` (`crypto.randomUUID()`), signs a JWT `{ userId }` with its `JWT_PRIVATE_KEY` (ES256 - see [JWT keys](#jwt-keys)), and returns it. The frontend caches this token in `localStorage` and sends it as `Authorization: Bearer <token>` on `/project` and `/start`, and as `{ auth: { token } }` on the Socket.IO connection to the pod. `orchestrator-simple` and the `runner` pod only ever hold the matching `JWT_PUBLIC_KEY` and can verify a token but never mint one.
 2. `POST /project` (init-service) requires a valid bearer token, rejects a `replId` that's already taken (409), and records `(replId, ownerId, createdAt)` in a shared SQLite table.
 3. `POST /start` (orchestrator-simple) requires a valid bearer token, looks up the `replId`'s owner, and rejects with `404` if the project doesn't exist or `403` if the caller isn't the owner. On success, it injects the verified `ownerId` into the pod as `OWNER_ID` (same substitution mechanism as `REPL_ID`) - no DB access needed inside the pod itself.
 4. The runner's Socket.IO connection handler verifies the token in the handshake (`socket.handshake.auth.token`) and disconnects unless the token's `userId` matches the pod's own `OWNER_ID`.
@@ -277,6 +278,22 @@ There is no login/password/email anywhere in this project - adding real user acc
 **This is intentionally a lightweight, anonymous, device-bound identity, not a real auth system** - a token just proves "the same browser that created this project is asking again." Clearing `localStorage` forfeits access to your own projects (no recovery mechanism), and there's no protection against someone deliberately exporting/sharing their token. Swapping in a real identity provider later would only require changing how `/auth/session` issues tokens - everything downstream (the bearer-token middleware, the ownership table, the socket check) stays the same.
 
 **Trade-off on `OWNERSHIP_DB_PATH`:** init-service and orchestrator-simple both read/write the same SQLite file directly rather than one service calling the other's API. That's the lightest option for two services that, today, are expected to run on the same host - but it means they **must** share a filesystem. If you deploy them on separate hosts/containers, either point `OWNERSHIP_DB_PATH` at a shared volume, or (better, for real multi-host deployment) replace the direct file access with a tiny internal ownership API that one service exposes and the other calls.
+
+## JWT keys
+
+**Why ES256, not EdDSA**: EdDSA (Ed25519) would be the first choice for a new asymmetric JWT setup - smaller keys, faster, no nonce-related footguns - but the installed `jsonwebtoken`/`jwa` version in this repo doesn't support it at all (confirmed by actually trying to sign with `algorithm: "EdDSA"`: `"algorithm" must be a valid string enum value` - `jwa`'s supported list is `HS256/384/512, RS256/384/512, PS256/384/512, ES256/384/512, none`, no EdDSA entry). ES256 (ECDSA P-256) is the next best fit already supported by the installed library, and keeps keys small (a public key is ~90 bytes of PEM) compared to RS256's ~2KB RSA keys.
+
+**Algorithm pinning**: every `jwt.verify` call across all three services passes `algorithms: ["ES256"]` explicitly (never left to default to "whatever the token's own header claims"), plus the expected `issuer`/`audience`. This is what actually stops an algorithm-confusion attack - without it, a forged token claiming `alg: "HS256"` and signed with the public key (treated as an HMAC secret) would otherwise be accepted, since a public key is, after all, just bytes. Every signed token also carries a `kid` header - see rotation below.
+
+**Rotating JWT keys**: because verification accepts a current and a previous public key, rotating doesn't log anyone out mid-rotation:
+
+1. Generate a new pair (same `openssl` commands as [setup step 3](#3-create-the-credentials-secret)).
+2. Set `JWT_PUBLIC_KEY_PREVIOUS` to the **old** public key (the one currently in `JWT_PUBLIC_KEY`), and `JWT_PUBLIC_KEY` to the **new** one, on `orchestrator-simple` and in the `sandbox-secrets` Secret (`k8s/create-secret.sh` now accepts `JWT_PUBLIC_KEY_PREVIOUS` as an optional env var).
+3. Set `JWT_PRIVATE_KEY` to the new private key on `init-service`.
+4. Restart both. Tokens already out in users' `localStorage`, signed with the old key, keep verifying (matched by their `kid` header against the old key's own derived id) until each is naturally replaced by a fresh `POST /auth/session` call or the user clears `localStorage`.
+5. Once you're confident the old key is no longer needed (or after your own chosen grace period - there's no automatic expiry, see below), remove `JWT_PUBLIC_KEY_PREVIOUS` everywhere. Any token still signed with the old key then stops verifying.
+
+**No `exp` claim, by design**: these tokens never expire. Clearing `localStorage` already forfeits access to a project with no recovery path (see the trade-off above) - an anonymous, device-bound identity has no real session to expire in the first place, so adding `exp` would only be one more way to get silently locked out of your own project, not a real security boundary. The only thing that invalidates an existing token today is rotating past it (above).
 
 ## Path safety
 

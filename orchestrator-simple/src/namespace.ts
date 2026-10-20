@@ -21,7 +21,7 @@ const SANDBOX_SECRET_NAME = "sandbox-secrets";
 // are only copied in the legacy (no AWS_STS_ROLE_ARN) fallback - once STS is
 // configured, the pod gets its own per-project scoped credentials instead
 // (see sts.ts), so there's no reason to also hand it bucket-wide ones.
-const BASE_COPIED_KEYS = ["JWT_PUBLIC_KEY", "INTERNAL_API_TOKEN"];
+const BASE_COPIED_KEYS = ["JWT_PUBLIC_KEY", "JWT_PUBLIC_KEY_PREVIOUS", "INTERNAL_API_TOKEN"];
 const LEGACY_AWS_KEYS = ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"];
 
 function isConflict(err: unknown): boolean {

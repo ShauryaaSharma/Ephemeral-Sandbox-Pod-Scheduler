@@ -141,6 +141,15 @@ spec:
                 secretKeyRef:
                   name: sandbox-secrets
                   key: JWT_PUBLIC_KEY
+            # Only present in sandbox-secrets while a key rotation is in
+            # progress (see README "Rotating JWT keys") - optional so the
+            # pod still starts the rest of the time.
+            - name: JWT_PUBLIC_KEY_PREVIOUS
+              valueFrom:
+                secretKeyRef:
+                  name: sandbox-secrets
+                  key: JWT_PUBLIC_KEY_PREVIOUS
+                  optional: true
             - name: INTERNAL_API_TOKEN
               valueFrom:
                 secretKeyRef:

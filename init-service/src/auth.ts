@@ -1,6 +1,6 @@
 import jwt from "jsonwebtoken";
 import { Request, Response, NextFunction } from "express";
-import { createPublicKey } from "crypto";
+import { createHash, createPublicKey } from "crypto";
 
 // A .env value can't contain a literal newline, so PEM keys are stored with
 // escaped "\n" sequences there - this normalizes either form back to real
@@ -9,6 +9,15 @@ import { createPublicKey } from "crypto";
 function normalizePem(pem: string): string {
     return pem.includes("\\n") ? pem.replace(/\\n/g, "\n") : pem;
 }
+
+// Pinned everywhere a token is verified (here and in orchestrator-simple/
+// runner's auth.ts) to rule out algorithm-confusion attacks - a token
+// claiming alg:"none" or alg:"HS256" (which would let anyone forge one
+// using the public key as an HMAC secret) is rejected outright, since
+// jwt.verify only ever tries the algorithms listed here.
+export const ALGORITHM = "ES256";
+export const ISSUER = "ephemeral-sandbox-init-service";
+export const AUDIENCE = "ephemeral-sandbox";
 
 const JWT_PRIVATE_KEY_RAW = process.env.JWT_PRIVATE_KEY;
 if (!JWT_PRIVATE_KEY_RAW) {
@@ -22,6 +31,14 @@ const JWT_PRIVATE_KEY = normalizePem(JWT_PRIVATE_KEY_RAW);
 // and never see this private key at all.
 const JWT_PUBLIC_KEY = createPublicKey(JWT_PRIVATE_KEY).export({ type: "spki", format: "pem" }).toString();
 
+// Identifies which public key a token was signed with, so verifiers holding
+// both a current and a previous key (see orchestrator-simple/runner's
+// auth.ts) know which one to check against during rotation - derived from
+// the key itself, not a manually-tracked version number.
+export function keyId(publicKeyPem: string): string {
+    return createHash("sha256").update(publicKeyPem).digest("hex").slice(0, 8);
+}
+
 export interface TokenPayload {
     userId: string;
 }
@@ -29,12 +46,28 @@ export interface TokenPayload {
 // Anonymous, device-bound identity: there's no login/password anywhere in
 // this project. A token just proves "the same browser that created replId X
 // is asking again" - enough to gate ownership, not a real identity system.
+//
+// No "exp" claim: clearing localStorage already forfeits access to a
+// project with no recovery path (see README "Auth & ownership"), so a token
+// expiring on top of that would just be one more way to get silently locked
+// out, not a real security boundary - this is anonymous, not authenticated,
+// identity. Rotating JWT_PRIVATE_KEY (see README "Generating the JWT key
+// pair") is the only way an existing token stops working.
 export function signToken(userId: string): string {
-    return jwt.sign({ userId }, JWT_PRIVATE_KEY, { algorithm: "RS256", expiresIn: "30d" });
+    return jwt.sign({ userId }, JWT_PRIVATE_KEY, {
+        algorithm: ALGORITHM,
+        keyid: keyId(JWT_PUBLIC_KEY),
+        issuer: ISSUER,
+        audience: AUDIENCE,
+    });
 }
 
 export function verifyToken(token: string): TokenPayload {
-    return jwt.verify(token, JWT_PUBLIC_KEY, { algorithms: ["RS256"] }) as TokenPayload;
+    return jwt.verify(token, JWT_PUBLIC_KEY, {
+        algorithms: [ALGORITHM],
+        issuer: ISSUER,
+        audience: AUDIENCE,
+    }) as TokenPayload;
 }
 
 declare global {

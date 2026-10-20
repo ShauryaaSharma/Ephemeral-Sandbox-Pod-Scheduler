@@ -227,11 +227,11 @@ Every `<replId>.<domain>` now gets HTTPS automatically, from this one cert.
 
 ## 9. Create the credentials Secret
 
-Generate the RS256 key pair tokens are signed with (only `init-service` keeps the private half):
+Generate the ES256 (ECDSA P-256) key pair tokens are signed with (only `init-service` keeps the private half - see README "JWT keys" for why ES256):
 
 ```bash
-openssl genrsa -out jwt-private.pem 2048
-openssl rsa -in jwt-private.pem -pubout -out jwt-public.pem
+openssl ecparam -genkey -name prime256v1 -noout -out jwt-private.pem
+openssl ec -in jwt-private.pem -pubout -out jwt-public.pem
 ```
 
 Using the R2 credentials from step 2 and the key pair above:
