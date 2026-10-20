@@ -56,9 +56,9 @@ export const Code = ({ selectedFile, socket }: { selectedFile: File | undefined,
   else if (language === "py" )
     language = "python"
 
-    function debounce(func: (value: string) => void, wait: number) {
+    function debounce(func: (value: string | undefined) => void, wait: number) {
       let timeout: number;
-      return (value: string) => {
+      return (value: string | undefined) => {
         clearTimeout(timeout);
         timeout = setTimeout(() => {
           func(value);
@@ -79,6 +79,8 @@ export const Code = ({ selectedFile, socket }: { selectedFile: File | undefined,
         value={code}
         theme="vs-dark"
         onChange={debounce((value) => {
+          // Monaco fires onChange with undefined on an empty/cleared editor.
+          if (value === undefined) return;
           setSaveState("saving");
           // Sends the whole file, not a diff - see the root README's
           // Roadmap ("send diffs instead of full files").

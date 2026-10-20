@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo } from "react";
 import Sidebar from "./external/editor/components/sidebar";
 import { Code } from "./external/editor/editor/code";
 import styled from "@emotion/styled";
@@ -26,6 +26,10 @@ export const Editor = ({
     if (!selectedFile) {
       onSelect(rootDir.files[0])
     }
+    // Only react to selectedFile changing - onSelect isn't memoized by the
+    // caller and rootDir is rebuilt on every files update, so including them
+    // would re-run this on every render instead of just on first selection.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedFile])
 
   return (

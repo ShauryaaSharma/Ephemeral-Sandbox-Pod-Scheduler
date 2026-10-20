@@ -42,6 +42,7 @@ addColumnIfMissing("ALTER TABLE projects ADD COLUMN last_active_at TEXT");
 addColumnIfMissing("ALTER TABLE projects ADD COLUMN health_status TEXT NOT NULL DEFAULT 'unknown'");
 addColumnIfMissing("ALTER TABLE projects ADD COLUMN restart_count INTEGER NOT NULL DEFAULT 0");
 addColumnIfMissing("ALTER TABLE projects ADD COLUMN unhealthy_reason TEXT");
+addColumnIfMissing("ALTER TABLE projects ADD COLUMN started_at TEXT");
 
 export type ProjectStatus = "created" | "started" | "stopped";
 // Orthogonal to ProjectStatus: a "started" project (a pod exists) can still
@@ -57,6 +58,12 @@ export interface ProjectRecord {
     healthStatus: HealthStatus;
     restartCount: number;
     unhealthyReason: string | null;
+    // When the current /start happened - distinct from lastActiveAt (which
+    // keeps moving with user activity) and createdAt (set once at
+    // POST /project, possibly long before any /start). Used by the reaper
+    // to force-stop a project before its STS session credentials expire,
+    // regardless of how active it still is - see MAX_PROJECT_LIFETIME_HOURS.
+    startedAt: string | null;
 }
 
 const SELECT_COLUMNS = `
@@ -67,7 +74,8 @@ const SELECT_COLUMNS = `
     last_active_at as lastActiveAt,
     health_status as healthStatus,
     restart_count as restartCount,
-    unhealthy_reason as unhealthyReason
+    unhealthy_reason as unhealthyReason,
+    started_at as startedAt
 `;
 
 export function getProject(replId: string): ProjectRecord | undefined {
@@ -78,10 +86,12 @@ export function getProject(replId: string): ProjectRecord | undefined {
 
 export function markStarted(replId: string): void {
     // A fresh start gets a clean health slate - stale restart counts/reasons
-    // from a previous run of this replId shouldn't carry over.
+    // from a previous run of this replId shouldn't carry over. started_at
+    // resets too - it tracks this specific session, not the project overall.
+    const now = new Date().toISOString();
     db.prepare(
-        "UPDATE projects SET status = 'started', last_active_at = ?, health_status = 'unknown', restart_count = 0, unhealthy_reason = NULL WHERE repl_id = ?"
-    ).run(new Date().toISOString(), replId);
+        "UPDATE projects SET status = 'started', last_active_at = ?, health_status = 'unknown', restart_count = 0, unhealthy_reason = NULL, started_at = ? WHERE repl_id = ?"
+    ).run(now, now, replId);
 }
 
 export function markStopped(replId: string): void {

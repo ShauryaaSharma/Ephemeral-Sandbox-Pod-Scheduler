@@ -227,11 +227,11 @@ Every `<replId>.<domain>` now gets HTTPS automatically, from this one cert.
 
 ## 9. Create the credentials Secret
 
-Generate the RS256 key pair tokens are signed with (only `init-service` keeps the private half):
+Generate the ES256 (ECDSA P-256) key pair tokens are signed with (only `init-service` keeps the private half - see README "JWT keys" for why ES256):
 
 ```bash
-openssl genrsa -out jwt-private.pem 2048
-openssl rsa -in jwt-private.pem -pubout -out jwt-public.pem
+openssl ecparam -genkey -name prime256v1 -noout -out jwt-private.pem
+openssl ec -in jwt-private.pem -pubout -out jwt-public.pem
 ```
 
 Using the R2 credentials from step 2 and the key pair above:
@@ -241,7 +241,7 @@ export AWS_ACCESS_KEY_ID=<your-r2-access-key-id>
 export AWS_SECRET_ACCESS_KEY=<your-r2-secret-access-key>
 export JWT_PRIVATE_KEY="$(cat jwt-private.pem)"   # save jwt-private.pem — you'll need it again in step 11
 export JWT_PUBLIC_KEY="$(cat jwt-public.pem)"     # save jwt-public.pem — you'll need it again in step 11
-export INTERNAL_API_TOKEN=$(openssl rand -hex 32) # save this value — you'll need it again in step 11
+export INTERNAL_API_MASTER_KEY=$(openssl rand -hex 32) # save this value — you'll need it again in step 11
 ./k8s/create-secret.sh
 ```
 
@@ -319,7 +319,7 @@ cp src/.env.example .env
 Fill in `.env`:
 ```
 JWT_PUBLIC_KEY=<contents of jwt-public.pem from step 9, with newlines escaped as \n>
-INTERNAL_API_TOKEN=<same value from step 9>
+INTERNAL_API_MASTER_KEY=<same value from step 9>
 OWNERSHIP_DB_PATH=/home/ubuntu/data/ownership.db
 WS_DOMAIN=ws.yourdomain.com
 APP_DOMAIN=apps.yourdomain.com

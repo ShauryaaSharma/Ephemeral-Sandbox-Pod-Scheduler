@@ -5,8 +5,8 @@ import { Terminal } from "xterm";
 import { FitAddon } from 'xterm-addon-fit';
 const fitAddon = new FitAddon();
 
-function ab2str(buf: string) {
-    return String.fromCharCode.apply(null, new Uint8Array(buf));
+function ab2str(buf: ArrayBuffer) {
+    return String.fromCharCode.apply(null, Array.from(new Uint8Array(buf)));
 }
 
 const OPTIONS_TERM = {
@@ -66,7 +66,7 @@ export const TerminalComponent = ({ socket }: {socket: Socket}) => {
         term.loadAddon(fitAddon);
         term.open(terminalRef.current);
         fitAddon.fit();
-        function terminalHandler({ data }) {
+        function terminalHandler({ data }: { data: ArrayBuffer }) {
             if (data instanceof ArrayBuffer) {
                 term.write(ab2str(data))
             }

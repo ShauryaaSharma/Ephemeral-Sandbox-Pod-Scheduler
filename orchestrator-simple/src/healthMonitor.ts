@@ -79,8 +79,10 @@ async function checkOneProject(coreV1Api: CoreV1Api, project: ProjectRecord): Pr
 
     if (health.crashLooping && !wasUnhealthy) {
         const reason = health.oomKilled ? "OOMKilled" : health.reason ?? "CrashLoopBackOff";
+        // ownerId deliberately left out of this line - see the identical
+        // note in reaper.ts's AUTO-TEARDOWN log.
         console.error(
-            `[health] ALERT: ${project.replId} (owner ${project.ownerId}) is crash-looping - reason=${reason} restarts=${health.restartCount}`
+            `[health] ALERT: ${project.replId} is crash-looping - reason=${reason} restarts=${health.restartCount}`
         );
         markUnhealthy(project.replId, reason);
         const event: AlertEvent = {

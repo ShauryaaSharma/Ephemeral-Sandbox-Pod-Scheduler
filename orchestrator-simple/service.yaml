@@ -26,17 +26,24 @@ spec:
       dnsConfig:
         options:
           - name: single-request
+      # Must comfortably clear /shutdown's/SIGTERM's own SYNC_TIMEOUT_MS
+      # (8s, see runner/src/index.ts) with margin, since that final S3 sync
+      # has to finish inside this window before Kubernetes sends SIGKILL.
+      terminationGracePeriodSeconds: 20
       # No Kubernetes API access needed inside a project's own pod - it only
       # ever talks to S3/R2 and this pod's own filesystem/terminal.
       automountServiceAccountToken: false
       securityContext:
+        # The init container below uses these as-is. The runner container
+        # overrides runAsNonRoot/runAsUser/runAsGroup with its own - see the
+        # comment on its own securityContext for why - but inherits fsGroup.
         runAsNonRoot: true
         runAsUser: 1000
         runAsGroup: 1000
-        # Owns the emptyDir volume below so both containers (even one not
-        # running as this uid) can read/write it - not needed here since
-        # both already run as 1000, but kept explicit for clarity/safety if
-        # that ever changes.
+        # Owns the emptyDir volume below, so every uid that ends up touching
+        # it (1000 here, but also the runner container's 0 and every
+        # terminal session's 1001 - see their own securityContext/env
+        # comments) can read/write it via shared group membership.
         fsGroup: 1000
         seccompProfile:
           type: RuntimeDefault
@@ -46,9 +53,15 @@ spec:
             sizeLimit: workspace_storage_limit_placeholder
       initContainers:
         - name: copy-s3-resources
-          image: amazon/aws-cli
-          # Same uid as the runner container below, so the files it writes
-          # into /workspace are owned by the uid that later reads/writes them.
+          # Pinned (not :latest) so a new push to this image can't silently
+          # change what runs in every project pod's init container.
+          image: amazon/aws-cli:2.38.2
+          # Uses the pod-level securityContext's uid/gid (1000) - the files
+          # it writes into /workspace end up group-owned by fsGroup 1000,
+          # which both the runner container (gid 1000, see below) and every
+          # terminal session (SANDBOX_SHELL_GID=1000, see below) share, so
+          # they can still read/write them despite none of those three
+          # running as this same uid.
           securityContext:
             runAsNonRoot: true
             runAsUser: 1000
@@ -103,19 +116,66 @@ spec:
       containers:
         - name: runner
           image: ghcr.io/shauryaasharma/runner:latest
+          # Overrides the pod-level securityContext above (which still
+          # covers the init container) - this process briefly needs real
+          # root (uid 0) to setuid/setgid the user's terminal down to a
+          # *different*, lower-privileged uid (1001, see SHELL_UID below)
+          # than its own. Every other capability is dropped, including
+          # CAP_SYS_PTRACE and CAP_DAC_OVERRIDE/CAP_DAC_READ_SEARCH - so
+          # this uid-0 process gets no DAC bypass (file permissions still
+          # apply to it exactly as they would to any uid, via its gid 1000
+          # matching fsGroup) and can't ptrace or read another uid's
+          # /proc/<pid>/environ, closing the gap where the user's own
+          # shell (now a different uid) could previously read this
+          # process's secrets that way. Permitted under this namespace's
+          # "baseline" Pod Security Admission label (see namespace.ts) -
+          # SETUID/SETGID are on baseline's allowed-capabilities list, and
+          # baseline (unlike "restricted") has no non-root requirement.
           securityContext:
-            runAsNonRoot: true
-            runAsUser: 1000
+            runAsNonRoot: false
+            runAsUser: 0
             runAsGroup: 1000
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
+              add: ["SETUID", "SETGID"]
             seccompProfile:
               type: RuntimeDefault
           ports:
             - containerPort: 3001
             - containerPort: 3000
+          # Port 3001 only - 3000 is the user's own project dev server
+          # (the Output iframe), not this container's Express app, so it
+          # has nothing a probe could check. All three probes point at
+          # /healthz/readyz rather than /health, which is token-gated and
+          # which the kubelet's stable probe API can't send that header for.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: 3001
+            failureThreshold: 30
+            periodSeconds: 2
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 3001
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 3001
+            periodSeconds: 10
           env:
+            # The uid/gid every terminal session (including autorun) is
+            # spawned as - see runner/src/pty.ts. gid matches the pod's
+            # fsGroup (1000) so /workspace stays accessible by group
+            # permission; uid is deliberately its own, distinct from both
+            # this container's uid (0, above) and the init container's
+            # (1000) - see the securityContext comment above for why.
+            - name: SANDBOX_SHELL_UID
+              value: "1001"
+            - name: SANDBOX_SHELL_GID
+              value: "1000"
             - name: REPL_ID
               value: service_name
             - name: OWNER_ID
@@ -141,10 +201,23 @@ spec:
                 secretKeyRef:
                   name: sandbox-secrets
                   key: JWT_PUBLIC_KEY
-            - name: INTERNAL_API_TOKEN
+            # Only present in sandbox-secrets while a key rotation is in
+            # progress (see README "Rotating JWT keys") - optional so the
+            # pod still starts the rest of the time.
+            - name: JWT_PUBLIC_KEY_PREVIOUS
               valueFrom:
                 secretKeyRef:
                   name: sandbox-secrets
+                  key: JWT_PUBLIC_KEY_PREVIOUS
+                  optional: true
+            # Per-project token, HMAC-derived from a master key orchestrator-simple
+            # alone holds (see src/internalToken.ts) - written fresh into its own
+            # Secret at /start time, not copied from sandbox-secrets like the
+            # keys above.
+            - name: INTERNAL_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: sandbox-internal-token
                   key: INTERNAL_API_TOKEN
             # Every project's Socket.IO/HTTP origin check must allow the one
             # configured frontend origin, not a per-project value - these are

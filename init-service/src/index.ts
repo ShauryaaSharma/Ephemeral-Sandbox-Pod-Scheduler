@@ -24,6 +24,13 @@ const app = express();
 app.use(express.json());
 app.use(cors({ origin: ALLOWED_ORIGINS }))
 
+// Unauthenticated and returns no data - safe for the kubelet to probe
+// (startup/readiness/liveness all point here; there's no slow dependency
+// to wait on separately, so one endpoint covers both).
+app.get("/healthz", (req, res) => {
+    res.sendStatus(200);
+});
+
 // Bootstraps an anonymous, device-bound identity - there's no login/password
 // in this project. The frontend calls this once, caches the token, and sends
 // it as a bearer token on every subsequent request.

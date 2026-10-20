@@ -1,26 +1,27 @@
 import axios from "axios";
 import { getStartedProjects, updateLastActive } from "./db";
 import { StopProjectFn } from "./stop";
+import { derivePodToken } from "./internalToken";
 
 const IDLE_TIMEOUT_MS = (Number(process.env.IDLE_TIMEOUT_MINUTES) || 15) * 60 * 1000;
 const REAP_INTERVAL_MS = (Number(process.env.REAPER_INTERVAL_SECONDS) || 60) * 1000;
 const WS_DOMAIN = process.env.WS_DOMAIN ?? "peetcode.com";
 const HEALTH_CHECK_TIMEOUT_MS = 5000;
 const MAX_TEARDOWN_EVENTS = 50;
-
-// Gates the runner's /health (see runner/src/index.ts) - without this
-// header, any caller reaching a pod's public ingress host could read its
-// last-activity timestamp.
-const INTERNAL_API_TOKEN = process.env.INTERNAL_API_TOKEN;
-if (!INTERNAL_API_TOKEN) {
-    throw new Error("INTERNAL_API_TOKEN environment variable is required");
-}
+// A project's STS session credentials (see sts.ts) expire
+// AWS_STS_SESSION_DURATION_SECONDS after /start, regardless of activity -
+// force a normal stop (final sync included) 15 minutes before that, so
+// nothing is ever caught mid-write with expired credentials. Same default
+// (12h) as the STS session itself; override together if you change one.
+const MAX_PROJECT_LIFETIME_MS = (Number(process.env.MAX_PROJECT_LIFETIME_HOURS) || 12) * 60 * 60 * 1000;
+const LIFETIME_SAFETY_MARGIN_MS = 15 * 60 * 1000;
 
 export interface TeardownEvent {
     replId: string;
     ownerId: string;
     idleMinutes: number;
     timestamp: string;
+    reason: "idle" | "max-lifetime";
 }
 
 const recentTeardowns: TeardownEvent[] = [];
@@ -54,7 +55,11 @@ export async function reapOnce(stopProject: StopProjectFn): Promise<void> {
         try {
             const { data } = await axios.get(`http://${project.replId}.${WS_DOMAIN}/health`, {
                 timeout: HEALTH_CHECK_TIMEOUT_MS,
-                headers: { "x-internal-token": INTERNAL_API_TOKEN },
+                // Recomputed from the master key on every call - gates the
+                // runner's /health (see runner/src/index.ts). Without this
+                // header, any caller reaching a pod's public ingress host
+                // could read its last-activity timestamp.
+                headers: { "x-internal-token": derivePodToken(project.replId) },
             });
             if (typeof data.lastActivityAt === "number") {
                 lastActiveAt = new Date(data.lastActivityAt).toISOString();
@@ -73,9 +78,21 @@ export async function reapOnce(stopProject: StopProjectFn): Promise<void> {
         const referenceTime = lastActiveAt ?? project.createdAt;
         const idleMs = Date.now() - new Date(referenceTime).getTime();
 
-        if (idleMs > IDLE_TIMEOUT_MS) {
+        // Checked regardless of activity - an actively-used project still
+        // gets stopped here, since its STS credentials (if STS is enabled)
+        // expire on a wall-clock schedule from /start, not from idleness.
+        const ageMs = project.startedAt ? Date.now() - new Date(project.startedAt).getTime() : 0;
+        const lifetimeExceeded = ageMs > MAX_PROJECT_LIFETIME_MS - LIFETIME_SAFETY_MARGIN_MS;
+
+        if (idleMs > IDLE_TIMEOUT_MS || lifetimeExceeded) {
             const idleMinutes = Math.round(idleMs / 60000);
-            console.log(`[reaper] AUTO-TEARDOWN ${project.replId} (owner ${project.ownerId}) - idle ${idleMinutes}min`);
+            const reason: TeardownEvent["reason"] = lifetimeExceeded ? "max-lifetime" : "idle";
+            // ownerId deliberately left out of this line - it already
+            // reaches the project's own owner (and an admin) through the
+            // access-controlled recentTeardowns event pushed below, not
+            // through unstructured stdout logs anyone with cluster log
+            // access could read.
+            console.log(`[reaper] AUTO-TEARDOWN ${project.replId} - reason=${reason} idle ${idleMinutes}min`);
             try {
                 await stopProject(project.replId);
                 console.log(`[reaper] AUTO-TEARDOWN complete for ${project.replId}`);
@@ -84,6 +101,7 @@ export async function reapOnce(stopProject: StopProjectFn): Promise<void> {
                     ownerId: project.ownerId,
                     idleMinutes,
                     timestamp: new Date().toISOString(),
+                    reason,
                 });
                 if (recentTeardowns.length > MAX_TEARDOWN_EVENTS) recentTeardowns.shift();
             } catch (err) {

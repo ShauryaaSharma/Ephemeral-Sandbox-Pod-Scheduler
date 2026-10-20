@@ -38,7 +38,7 @@ export function buildFileTree(data: RemoteFile[]): Directory {
   const files = data.filter(x => x.type === "file");
   const cache = new Map<string, Directory | File>(); // 缓存
   // 待构建的根目录
-  let rootDir: Directory = {
+  const rootDir: Directory = {
     id: "root",
     name: "root",
     parentId: undefined,
@@ -50,7 +50,7 @@ export function buildFileTree(data: RemoteFile[]): Directory {
   };
   // 将<id，目录对象>存入map
   dirs.forEach((item) => {
-    let dir: Directory = {
+    const dir: Directory = {
       id: item.path,
       name: item.name,
       path: item.path,
@@ -65,7 +65,7 @@ export function buildFileTree(data: RemoteFile[]): Directory {
   });
   // 将<id，文件对象>存入map
   files.forEach((item) => {
-    let file: File = {
+    const file: File = {
       id: item.path,
       name: item.name,
       path: item.path,
@@ -76,7 +76,7 @@ export function buildFileTree(data: RemoteFile[]): Directory {
     cache.set(file.id, file);
   });
   // 开始遍历构建文件树
-  cache.forEach((value, key) => {
+  cache.forEach((value) => {
     // '0'表示文件或目录位于根目录
     if (value.parentId === "0") {
       if (value.type === Type.DIRECTORY) rootDir.dirs.push(value as Directory);

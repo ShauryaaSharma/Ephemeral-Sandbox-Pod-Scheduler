@@ -16,8 +16,10 @@ import { ensureNamespace, deleteProjectNamespace } from "./namespace";
 import { withRetry, checkPodSchedulable, translateK8sError } from "./capacity";
 import { rateLimit } from "./rateLimit";
 import { assumeRoleForProject, isStsEnabled, writeProjectCredentialsSecret, PROJECT_CREDENTIALS_SECRET_NAME } from "./sts";
+import { writePodTokenSecret } from "./internalToken";
 import { ALLOWED_ORIGINS } from "./corsOrigins";
 import { isValidReplId } from "./validators";
+import { logger } from "./logger";
 
 // Express 4 doesn't catch a rejected async route handler for you - an
 // unguarded await that throws becomes an unhandled rejection, which Node
@@ -32,6 +34,13 @@ process.on("unhandledRejection", (reason) => {
 const app = express();
 app.use(express.json());
 app.use(cors({ origin: ALLOWED_ORIGINS }));
+
+// Unauthenticated and returns no data - safe for the kubelet to probe
+// (startup/readiness/liveness all point here; there's no slow dependency
+// to wait on separately, so one endpoint covers both).
+app.get("/healthz", (req, res) => {
+    res.sendStatus(200);
+});
 
 // Config-driven instead of baked into the committed service.yaml template -
 // WS_DOMAIN also has to match what runner/frontend use to reach a pod (see
@@ -84,7 +93,10 @@ const readAndParseKubeYaml = (filePath: string, substitutions: Record<string, st
             const regex = new RegExp(placeholder, 'g');
             docString = docString.replace(regex, value);
         }
-        console.log(docString);
+        // Debug-only: this is the fully-substituted manifest for a project
+        // pod, including its OWNER_ID - not something to print at the
+        // default log level.
+        logger.debug(docString);
         return yaml.parse(docString);
     });
     return docs;
@@ -110,6 +122,10 @@ app.post("/start", requireAuth, rateLimit, async (req, res) => {
 
     try {
         const namespace = await ensureNamespace(coreV1Api, replId, !isStsEnabled());
+
+        // Every project gets its own HMAC-derived internal token (never the
+        // master key itself) regardless of STS mode - see internalToken.ts.
+        await writePodTokenSecret(coreV1Api, namespace, replId);
 
         // With AWS_STS_ROLE_ARN set, this project's pod gets its own
         // short-lived credentials scoped to code/<replId>/* instead of the

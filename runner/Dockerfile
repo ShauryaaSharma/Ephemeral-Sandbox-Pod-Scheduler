@@ -11,18 +11,18 @@ RUN npm run build
 
 FROM node:20.18.1-bookworm
 WORKDIR /code
-# Matches the pod/container securityContext's runAsUser/runAsGroup/fsGroup
-# (1000) in orchestrator-simple/service.yaml - must be numeric so
-# Kubernetes' runAsNonRoot check (which inspects the image, not /etc/passwd)
-# is satisfiable, and so this uid can read/write /workspace once the
-# orchestrator mounts it with fsGroup 1000.
-RUN groupadd -g 1000 app && useradd -u 1000 -g app -m -s /bin/bash app
+# The base image already ships a "node" user/group at uid/gid 1000 (confirmed
+# by actually building this - a redundant groupadd here fails with "GID 1000
+# already exists") - reuse it below instead of creating a new one. Matches
+# the pod/container securityContext's runAsUser/runAsGroup/fsGroup (1000) in
+# orchestrator-simple/service.yaml, and lets this uid read/write /workspace
+# once the orchestrator mounts it with fsGroup 1000.
 COPY package*.json ./
 # --omit=dev: this stage ships to the pod, so build-only deps (typescript,
 # ts-node, nodemon, @types/*) don't belong in the final image.
 RUN npm ci --omit=dev
 COPY --from=build /code/dist ./dist
-USER app
+USER node
 
 # Your app binds to port 3000 so you'll use the EXPOSE instruction to have it mapped by the docker daemon
 EXPOSE 3000 3001

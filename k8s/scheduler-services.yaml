@@ -31,7 +31,15 @@ data:
   # credentials scoped to code/<replId>/*. Leave blank to keep the legacy
   # bucket-wide-credentials fallback (see README "Scoped S3 credentials").
   AWS_STS_ROLE_ARN: ""
-  AWS_STS_SESSION_DURATION_SECONDS: "3600"
+  # Matches MAX_PROJECT_LIFETIME_HOURS below (12h) - see README "Scoped S3
+  # credentials" and docs/ROADMAP.md. On IRSA, role chaining caps this at
+  # 3600 regardless.
+  AWS_STS_SESSION_DURATION_SECONDS: "43200"
+  MAX_PROJECT_LIFETIME_HOURS: "12"
+  # debug|info|warn|error (default: info) - orchestrator-simple only. debug
+  # also prints every project pod's fully-substituted manifest at /start
+  # time, including its OWNER_ID - leave at info in production.
+  LOG_LEVEL: "info"
   WS_DOMAIN: "peetcode.com"
   APP_DOMAIN: "autogpt-cloud.com"
   IDLE_TIMEOUT_MINUTES: "15"
@@ -78,6 +86,11 @@ spec:
     spec:
       # No Kubernetes API access needed - init-service only ever talks to S3/R2.
       automountServiceAccountToken: false
+      # fsGroup matches the image's "app" user (uid/gid 1000, see
+      # init-service/Dockerfile) so that uid can write /data/ownership.db on
+      # the PVC regardless of the volume's own default ownership.
+      securityContext:
+        fsGroup: 1000
       volumes:
         - name: ownership-db
           persistentVolumeClaim:
@@ -85,8 +98,33 @@ spec:
       containers:
         - name: init-service
           image: <your-registry>/init-service:latest
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
           ports:
             - containerPort: 3001
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: 3001
+            failureThreshold: 30
+            periodSeconds: 2
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 3001
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 3001
+            periodSeconds: 10
           envFrom:
             - configMapRef:
                 name: scheduler-config
@@ -126,6 +164,12 @@ spec:
         app: orchestrator-simple
     spec:
       serviceAccountName: sandbox-orchestrator # see k8s/rbac.yaml
+      # fsGroup matches the image's "app" user (uid/gid 1000, see
+      # orchestrator-simple/Dockerfile) so that uid can write
+      # /data/ownership.db on the PVC regardless of the volume's own default
+      # ownership.
+      securityContext:
+        fsGroup: 1000
       volumes:
         - name: ownership-db
           persistentVolumeClaim:
@@ -133,13 +177,44 @@ spec:
       containers:
         - name: orchestrator-simple
           image: <your-registry>/orchestrator-simple:latest
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
           ports:
             - containerPort: 3002
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: 3002
+            failureThreshold: 30
+            periodSeconds: 2
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 3002
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 3002
+            periodSeconds: 10
           envFrom:
             - configMapRef:
                 name: scheduler-config
             - secretRef:
                 name: sandbox-secrets
+            # INTERNAL_API_MASTER_KEY - only orchestrator-simple ever derives
+            # per-project tokens from this (see src/internalToken.ts), so
+            # only its deployment gets this secretRef (see
+            # k8s/create-secret.sh). Never copied into a project namespace.
+            - secretRef:
+                name: orchestrator-secrets
           volumeMounts:
             - name: ownership-db
               mountPath: /data
