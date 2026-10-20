@@ -15,6 +15,9 @@ import { getPodResourceUsage } from "./monitor";
 import { ensureNamespace, deleteProjectNamespace } from "./namespace";
 import { withRetry, checkPodSchedulable, translateK8sError } from "./capacity";
 import { rateLimit } from "./rateLimit";
+import { assumeRoleForProject, isStsEnabled, writeProjectCredentialsSecret, PROJECT_CREDENTIALS_SECRET_NAME } from "./sts";
+import { ALLOWED_ORIGINS } from "./corsOrigins";
+import { isValidReplId } from "./validators";
 
 // Express 4 doesn't catch a rejected async route handler for you - an
 // unguarded await that throws becomes an unhandled rejection, which Node
@@ -28,13 +31,38 @@ process.on("unhandledRejection", (reason) => {
 
 const app = express();
 app.use(express.json());
-app.use(cors());
+app.use(cors({ origin: ALLOWED_ORIGINS }));
 
 // Config-driven instead of baked into the committed service.yaml template -
 // WS_DOMAIN also has to match what runner/frontend use to reach a pod (see
 // stop.ts/reaper.ts and the frontend's VITE_WS_DOMAIN).
 const WS_DOMAIN = process.env.WS_DOMAIN ?? "peetcode.com";
 const APP_DOMAIN = process.env.APP_DOMAIN ?? "autogpt-cloud.com";
+// /workspace's disk ceiling - same mechanism as the domains above (plain
+// string substitution into service.yaml, not baked into the committed
+// template). Applies to the emptyDir's own sizeLimit and both containers'
+// ephemeral-storage requests/limits.
+const WORKSPACE_STORAGE_REQUEST = process.env.WORKSPACE_STORAGE_REQUEST ?? "512Mi";
+const WORKSPACE_STORAGE_LIMIT = process.env.WORKSPACE_STORAGE_LIMIT ?? "1Gi";
+// NetworkPolicy egress exceptions - same substitution mechanism as the
+// domains/storage above, instead of the committed template hardcoding
+// kubeadm/k3s-specific defaults. Confirm these for your actual cluster
+// (see the comment above the NetworkPolicy doc in service.yaml).
+const POD_CIDR = process.env.POD_CIDR ?? "10.42.0.0/16";
+const SERVICE_CIDR = process.env.SERVICE_CIDR ?? "10.43.0.0/16";
+
+// Opt-in cluster-wide view on /status and /projects/:replId/status - unset
+// (the default) means every caller only ever sees their own projects.
+const ADMIN_USER_IDS = new Set(
+    (process.env.ADMIN_USER_IDS ?? "")
+        .split(",")
+        .map((id) => id.trim())
+        .filter(Boolean)
+);
+
+function isAdmin(userId: string | undefined): boolean {
+    return Boolean(userId) && ADMIN_USER_IDS.has(userId as string);
+}
 
 const kubeconfig = new KubeConfig();
 kubeconfig.loadFromDefault();
@@ -65,8 +93,8 @@ const readAndParseKubeYaml = (filePath: string, substitutions: Record<string, st
 app.post("/start", requireAuth, rateLimit, async (req, res) => {
     const { replId } = req.body;
 
-    if (!replId) {
-        res.status(400).send({ message: "Bad request" });
+    if (!isValidReplId(replId)) {
+        res.status(400).send({ message: "Invalid replId: must match ^[a-z0-9]([a-z0-9-]{1,38}[a-z0-9])?$" });
         return;
     }
 
@@ -81,12 +109,32 @@ app.post("/start", requireAuth, rateLimit, async (req, res) => {
     }
 
     try {
-        const namespace = await ensureNamespace(coreV1Api, replId);
+        const namespace = await ensureNamespace(coreV1Api, replId, !isStsEnabled());
+
+        // With AWS_STS_ROLE_ARN set, this project's pod gets its own
+        // short-lived credentials scoped to code/<replId>/* instead of the
+        // bucket-wide keys in sandbox-secrets (see sts.ts). Without it, the
+        // manifest below falls back to sandbox-secrets, already copied into
+        // this namespace by ensureNamespace above.
+        let awsCredentialsSecretName = "sandbox-secrets";
+        if (isStsEnabled()) {
+            const credentials = await assumeRoleForProject(replId);
+            await writeProjectCredentialsSecret(coreV1Api, namespace, credentials);
+            awsCredentialsSecretName = PROJECT_CREDENTIALS_SECRET_NAME;
+        }
+
         const kubeManifests = readAndParseKubeYaml(path.join(__dirname, "../service.yaml"), {
             service_name: replId,
             owner_id_placeholder: project.ownerId,
             ws_domain_placeholder: WS_DOMAIN,
             app_domain_placeholder: APP_DOMAIN,
+            aws_credentials_secret_placeholder: awsCredentialsSecretName,
+            workspace_storage_request_placeholder: WORKSPACE_STORAGE_REQUEST,
+            workspace_storage_limit_placeholder: WORKSPACE_STORAGE_LIMIT,
+            allowed_origins_placeholder: ALLOWED_ORIGINS.join(","),
+            node_env_placeholder: process.env.NODE_ENV ?? "development",
+            pod_cidr_placeholder: POD_CIDR,
+            service_cidr_placeholder: SERVICE_CIDR,
         });
         for (const manifest of kubeManifests) {
             switch (manifest.kind) {
@@ -160,13 +208,12 @@ app.post("/stop", requireAuth, async (req, res) => {
     }
 });
 
-// Cluster-wide operational view. Not ownership-scoped (there's no admin/role
-// concept in this project) - any authenticated caller sees every project.
-// Fine for a portfolio-scale deployment; a real multi-tenant deployment
-// would want this restricted to an admin role.
+// Ownership-scoped by default - a caller only sees their own projects.
+// ADMIN_USER_IDS opts specific users into the old cluster-wide view.
 app.get("/status", requireAuth, async (req, res) => {
     try {
-        const active = getStartedProjects();
+        const admin = isAdmin(req.userId);
+        const active = getStartedProjects().filter((p) => admin || p.ownerId === req.userId);
         const unhealthy = active.filter((p) => p.healthStatus === "unhealthy");
 
         const projects = await Promise.all(
@@ -185,8 +232,8 @@ app.get("/status", requireAuth, async (req, res) => {
             totalActivePods: active.length,
             unhealthyCount: unhealthy.length,
             projects,
-            recentAutoTeardowns: getRecentAutoTeardowns(),
-            recentAlerts: getRecentAlerts(),
+            recentAutoTeardowns: getRecentAutoTeardowns().filter((e) => admin || e.ownerId === req.userId),
+            recentAlerts: getRecentAlerts().filter((e) => admin || e.ownerId === req.userId),
         });
     } catch (err) {
         // getPodResourceUsage already catches internally today, but this
@@ -208,7 +255,7 @@ app.get("/projects/:replId/status", requireAuth, async (req, res) => {
         res.status(404).send({ message: "Project not found" });
         return;
     }
-    if (project.ownerId !== req.userId) {
+    if (project.ownerId !== req.userId && !isAdmin(req.userId)) {
         res.status(403).send({ message: "You do not own this project" });
         return;
     }

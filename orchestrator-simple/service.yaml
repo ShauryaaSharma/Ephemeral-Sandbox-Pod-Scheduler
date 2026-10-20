@@ -26,12 +26,38 @@ spec:
       dnsConfig:
         options:
           - name: single-request
+      # No Kubernetes API access needed inside a project's own pod - it only
+      # ever talks to S3/R2 and this pod's own filesystem/terminal.
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        # Owns the emptyDir volume below so both containers (even one not
+        # running as this uid) can read/write it - not needed here since
+        # both already run as 1000, but kept explicit for clarity/safety if
+        # that ever changes.
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
       volumes:
         - name: workspace-volume
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: workspace_storage_limit_placeholder
       initContainers:
         - name: copy-s3-resources
           image: amazon/aws-cli
+          # Same uid as the runner container below, so the files it writes
+          # into /workspace are owned by the uid that later reads/writes them.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
           command: ["/bin/sh", "-c"]
           args:
             # --endpoint-url is conditional (${S3_ENDPOINT:+...}) so this
@@ -43,24 +69,49 @@ spec:
               aws s3 cp s3://your-bucket-name/code/service_name/ /workspace/ --recursive ${S3_ENDPOINT:+--endpoint-url "$S3_ENDPOINT"} &&
               echo "Resources copied from S3";
           env:
+            # aws_credentials_secret_placeholder is substituted at /start time
+            # to either "sandbox-secrets" (bucket-wide, legacy fallback) or
+            # the per-project STS-scoped secret - see orchestrator-simple's
+            # sts.ts/index.ts. AWS_SESSION_TOKEN is optional because the
+            # legacy secret doesn't have one.
             - name: AWS_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:
-                  name: sandbox-secrets
+                  name: aws_credentials_secret_placeholder
                   key: AWS_ACCESS_KEY_ID
             - name: AWS_SECRET_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
-                  name: sandbox-secrets
+                  name: aws_credentials_secret_placeholder
                   key: AWS_SECRET_ACCESS_KEY
+            - name: AWS_SESSION_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: aws_credentials_secret_placeholder
+                  key: AWS_SESSION_TOKEN
+                  optional: true
             - name: S3_ENDPOINT
               value: "your-s3-endpoint" # leave blank for real AWS S3; set for R2/MinIO/etc - must match the runner container's S3_ENDPOINT below
           volumeMounts:
             - name: workspace-volume
               mountPath: /workspace
+          resources:
+            requests:
+              ephemeral-storage: workspace_storage_request_placeholder
+            limits:
+              ephemeral-storage: workspace_storage_limit_placeholder
       containers:
         - name: runner
           image: ghcr.io/shauryaasharma/runner:latest
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
           ports:
             - containerPort: 3001
             - containerPort: 3000
@@ -72,18 +123,38 @@ spec:
             - name: AWS_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:
-                  name: sandbox-secrets
+                  name: aws_credentials_secret_placeholder
                   key: AWS_ACCESS_KEY_ID
             - name: AWS_SECRET_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
-                  name: sandbox-secrets
+                  name: aws_credentials_secret_placeholder
                   key: AWS_SECRET_ACCESS_KEY
-            - name: JWT_SECRET
+            - name: AWS_SESSION_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: aws_credentials_secret_placeholder
+                  key: AWS_SESSION_TOKEN
+                  optional: true
+            - name: JWT_PUBLIC_KEY
               valueFrom:
                 secretKeyRef:
                   name: sandbox-secrets
-                  key: JWT_SECRET
+                  key: JWT_PUBLIC_KEY
+            - name: INTERNAL_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: sandbox-secrets
+                  key: INTERNAL_API_TOKEN
+            # Every project's Socket.IO/HTTP origin check must allow the one
+            # configured frontend origin, not a per-project value - these are
+            # substituted from orchestrator-simple's own ALLOWED_ORIGINS/
+            # NODE_ENV (see corsOrigins.ts/index.ts), the same source of truth
+            # its own CORS check uses.
+            - name: ALLOWED_ORIGINS
+              value: "allowed_origins_placeholder"
+            - name: NODE_ENV
+              value: "node_env_placeholder"
             - name: S3_BUCKET
               value: "your-bucket-name"
             - name: S3_ENDPOINT
@@ -92,7 +163,6 @@ spec:
             - name: workspace-volume
               mountPath: /workspace
           resources:
-            # Bounty $25 Use ephemeral-storage to add space limits here
             # Lowered from 1 CPU/1Gi to fit on a free-tier Micro node (956Mi
             # total RAM, shared with k3s itself + ingress-nginx) - found by
             # actually trying to schedule a pod here and hitting "Insufficient
@@ -102,9 +172,11 @@ spec:
             requests:
               cpu: "100m"
               memory: "256Mi"
+              ephemeral-storage: workspace_storage_request_placeholder
             limits:
               cpu: "500m"
               memory: "400Mi"
+              ephemeral-storage: workspace_storage_limit_placeholder
 
 ---
 apiVersion: v1
@@ -203,18 +275,33 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
-    # Everything else EXCEPT the cluster's own internal ranges. This is what
-    # stops one project's pod from reaching another project's pod or the
-    # Kubernetes API server, while still allowing npm/pip installs and S3/R2
-    # access out to the open internet. The two CIDRs below are common
-    # kubeadm defaults - confirm (or replace) them for your cluster:
+    # Everything else EXCEPT the cluster's own internal ranges, the cloud
+    # metadata endpoint, and the RFC1918 private ranges. This is what stops
+    # one project's pod from reaching another project's pod, the Kubernetes
+    # API server, the cloud provider's instance-metadata service (a classic
+    # SSRF-to-credential-theft target - AWS/GCP/Azure all serve it at
+    # 169.254.169.254), or anything else on the cluster's private network -
+    # while still allowing npm/pip installs and S3/R2 access out to the open
+    # internet. pod_cidr_placeholder/service_cidr_placeholder are substituted
+    # at /start time from orchestrator-simple's POD_CIDR/SERVICE_CIDR env
+    # vars instead of being hardcoded kubeadm defaults - confirm your
+    # cluster's actual values:
     #   pod CIDR:     kubectl cluster-info dump | grep -m1 cluster-cidr
     #   service CIDR: check your provider's docs (EKS/GKE/AKS/k3s all default
     #                 to different ranges); the API server's ClusterIP
     #                 (`kubectl get svc kubernetes`) falls inside it.
+    # NOTE: this is IP/CIDR-level only - it does not restrict *which*
+    # internet hosts a pod can reach (any public IP is still allowed, e.g.
+    # for npm/pip/S3). An FQDN allowlist (only npm/pip/S3's actual hostnames)
+    # needs a CNI with FQDN-based NetworkPolicy support (e.g. Cilium) or an
+    # egress proxy - not implemented in this repo, see README "Network policy".
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
             except:
-              - 10.42.0.0/16 # pod CIDR - k3s default
-              - 10.43.0.0/16  # service CIDR (covers the API server) - k3s default
+              - 169.254.169.254/32 # cloud metadata endpoint (AWS/GCP/Azure)
+              - 10.0.0.0/8 # RFC1918
+              - 172.16.0.0/12 # RFC1918
+              - 192.168.0.0/16 # RFC1918
+              - pod_cidr_placeholder
+              - service_cidr_placeholder

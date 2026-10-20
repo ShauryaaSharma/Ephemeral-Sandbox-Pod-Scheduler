@@ -227,12 +227,21 @@ Every `<replId>.<domain>` now gets HTTPS automatically, from this one cert.
 
 ## 9. Create the credentials Secret
 
-Using the R2 credentials from step 2:
+Generate the RS256 key pair tokens are signed with (only `init-service` keeps the private half):
+
+```bash
+openssl genrsa -out jwt-private.pem 2048
+openssl rsa -in jwt-private.pem -pubout -out jwt-public.pem
+```
+
+Using the R2 credentials from step 2 and the key pair above:
 
 ```bash
 export AWS_ACCESS_KEY_ID=<your-r2-access-key-id>
 export AWS_SECRET_ACCESS_KEY=<your-r2-secret-access-key>
-export JWT_SECRET=$(openssl rand -hex 32)   # save this value — you'll need it again in step 11
+export JWT_PRIVATE_KEY="$(cat jwt-private.pem)"   # save jwt-private.pem — you'll need it again in step 11
+export JWT_PUBLIC_KEY="$(cat jwt-public.pem)"     # save jwt-public.pem — you'll need it again in step 11
+export INTERNAL_API_TOKEN=$(openssl rand -hex 32) # save this value — you'll need it again in step 11
 ./k8s/create-secret.sh
 ```
 
@@ -245,17 +254,17 @@ Edit `orchestrator-simple/service.yaml`:
 - `image: 100xdevs/runner:latest` → `image: ghcr.io/<your-github-username>/runner:latest`
 - `S3_BUCKET` value → your R2 bucket name
 - `S3_ENDPOINT` value → your R2 endpoint from step 2
-- In the `NetworkPolicy` block: the pod/service CIDR `except:` values — get your
-  cluster's actual pod CIDR with:
-  ```bash
-  kubectl cluster-info dump | grep -m1 cluster-cidr
-  ```
-  (k3s defaults to `10.42.0.0/16` for pods and `10.43.0.0/16` for services — likely
-  already correct unless you changed k3s's install flags, but confirm)
 
-The `ingress-nginx` namespace label in the `NetworkPolicy` and the
-`ws_domain_placeholder`/`app_domain_placeholder` Ingress hosts don't need editing —
-those are substituted automatically at `/start` time.
+The `ingress-nginx` namespace label in the `NetworkPolicy`, its pod/service CIDR
+`except:` values (`POD_CIDR`/`SERVICE_CIDR`, set on `orchestrator-simple` in step
+11 below), and the `ws_domain_placeholder`/`app_domain_placeholder` Ingress hosts
+don't need editing here — all substituted automatically at `/start` time. k3s
+defaults to `10.42.0.0/16` for pods and `10.43.0.0/16` for services (this repo's
+own defaults), so step 11 only needs `POD_CIDR`/`SERVICE_CIDR` set explicitly if
+your cluster differs — confirm with:
+```bash
+kubectl cluster-info dump | grep -m1 cluster-cidr
+```
 
 ---
 
@@ -294,8 +303,10 @@ S3_BUCKET=<your-r2-bucket>
 AWS_ACCESS_KEY_ID=<your-r2-access-key-id>
 AWS_SECRET_ACCESS_KEY=<your-r2-secret-access-key>
 S3_ENDPOINT=<your-r2-endpoint>
-JWT_SECRET=<same value from step 9>
+JWT_PRIVATE_KEY=<contents of jwt-private.pem from step 9, with newlines escaped as \n>
 OWNERSHIP_DB_PATH=/home/ubuntu/data/ownership.db
+NODE_ENV=production
+ALLOWED_ORIGINS=https://app.yourdomain.com
 ```
 
 **orchestrator-simple**:
@@ -307,10 +318,13 @@ cp src/.env.example .env
 ```
 Fill in `.env`:
 ```
-JWT_SECRET=<same value as init-service, above>
+JWT_PUBLIC_KEY=<contents of jwt-public.pem from step 9, with newlines escaped as \n>
+INTERNAL_API_TOKEN=<same value from step 9>
 OWNERSHIP_DB_PATH=/home/ubuntu/data/ownership.db
 WS_DOMAIN=ws.yourdomain.com
 APP_DOMAIN=apps.yourdomain.com
+NODE_ENV=production
+ALLOWED_ORIGINS=https://app.yourdomain.com
 ```
 (Both services pointing at the same `OWNERSHIP_DB_PATH` on this one VM's local
 disk is exactly the "shared filesystem" the README calls for — running both

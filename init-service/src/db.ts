@@ -59,3 +59,10 @@ export function createProject(replId: string, ownerId: string): void {
         new Date().toISOString()
     );
 }
+
+// Used by POST /project to roll back the reserved row when the S3 copy that
+// follows it fails - without this, a failed copy would leave a replId
+// permanently "taken" with no project behind it.
+export function deleteProject(replId: string): void {
+    db.prepare("DELETE FROM projects WHERE repl_id = ?").run(replId);
+}

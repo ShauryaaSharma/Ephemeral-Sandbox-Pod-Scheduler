@@ -1,10 +1,14 @@
 import { Server, Socket } from "socket.io";
 import { Server as HttpServer } from "http";
 import { saveToS3 } from "./aws";
-import path from "path";
-import { fetchDir, fetchFileContent, saveFile } from "./fs";
+import { fetchDir, fetchFileContent, saveFile, resolveInWorkspace, WORKSPACE_DIR } from "./fs";
 import { TerminalManager } from "./pty";
 import { verifyToken } from "./auth";
+import { ALLOWED_ORIGINS } from "./corsOrigins";
+
+// Default 1MB - env-configurable since some projects legitimately have
+// larger generated/vendored files.
+const MAX_UPDATE_CONTENT_BYTES = Number(process.env.MAX_FILE_UPDATE_BYTES) || 1024 * 1024;
 
 // Shared with autorun.ts so the auto-started project process lives in the
 // same registry as user-opened terminal sessions.
@@ -26,19 +30,26 @@ function touch() {
 export function initWs(httpServer: HttpServer) {
     const io = new Server(httpServer, {
         cors: {
-            // Should restrict this more!
-            origin: "*",
+            // Every project's subdomain is dynamic (<replId>.<WS_DOMAIN>), but
+            // the browser origin actually making this connection is always the
+            // one configured frontend origin - not a per-project value.
+            origin: ALLOWED_ORIGINS,
             methods: ["GET", "POST"],
         },
     });
 
     io.on("connection", async (socket) => {
-        const host = socket.handshake.headers.host;
-        console.log(`host is ${host}`);
-        // Split the host by '.' and take the first part as replId
-        const replId = host?.split('.')[0];
+        // Trusting the Host header to derive replId let a client that could
+        // reach this pod directly (bypassing the ingress's subdomain
+        // routing) claim to be whatever project it wanted, since the header
+        // is entirely client-controlled. Every pod only ever serves exactly
+        // one project - REPL_ID is injected by the orchestrator at
+        // pod-creation time (the same value used for /health, autorun,
+        // etc.), so it's the trustworthy source for this.
+        const replId = process.env.REPL_ID;
 
         if (!replId) {
+            console.error("REPL_ID environment variable is not set - rejecting connection");
             socket.disconnect();
             terminalManager.clear(socket.id);
             return;
@@ -69,7 +80,7 @@ export function initWs(httpServer: HttpServer) {
         touch();
         try {
             socket.emit("loaded", {
-                rootContent: await fetchDir("/workspace", "")
+                rootContent: await fetchDir(WORKSPACE_DIR, "")
             });
         } catch (err) {
             // Any async handler in this file rejecting used to crash the
@@ -99,7 +110,7 @@ function initHandlers(socket: Socket, replId: string) {
     socket.on("fetchDir", async (dir: string, callback) => {
         touch();
         try {
-            const dirPath = `/workspace/${dir}`;
+            const dirPath = resolveInWorkspace(dir);
             const contents = await fetchDir(dirPath, dir);
             callback(contents);
         } catch (err) {
@@ -111,7 +122,7 @@ function initHandlers(socket: Socket, replId: string) {
     socket.on("fetchContent", async ({ path: filePath }: { path: string }, callback) => {
         touch();
         try {
-            const fullPath = `/workspace/${filePath}`;
+            const fullPath = resolveInWorkspace(filePath);
             const data = await fetchFileContent(fullPath);
             callback(data);
         } catch (err) {
@@ -121,14 +132,22 @@ function initHandlers(socket: Socket, replId: string) {
     });
 
     // TODO: contents should be diff, not full file
-    // Should be validated for size
     // Should be throttled before updating S3 (or use an S3 mount)
     socket.on("updateContent", async ({ path: filePath, content }: { path: string, content: string }) => {
         touch();
         try {
-            const fullPath = `/workspace/${filePath}`;
+            if (typeof content !== "string" || Buffer.byteLength(content, "utf-8") > MAX_UPDATE_CONTENT_BYTES) {
+                console.warn(`updateContent rejected for ${replId} (${filePath}): payload too large`);
+                return;
+            }
+            const fullPath = resolveInWorkspace(filePath);
             await saveFile(fullPath, content);
-            await saveToS3(`code/${replId}`, filePath, content);
+            // Built from the same validated/normalized path as the local
+            // write above, not the raw client-supplied filePath, so a
+            // traversal attempt can't produce a different (and possibly
+            // unsafe) S3 key than the file it actually wrote to.
+            const safeRelativePath = "/" + fullPath.slice(WORKSPACE_DIR.length).replace(/^\/+/, "");
+            await saveToS3(`code/${replId}`, safeRelativePath, content);
         } catch (err) {
             // No ack callback on this event today, so there's nothing to
             // report back to the client - but the process must survive a

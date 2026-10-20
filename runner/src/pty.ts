@@ -1,6 +1,7 @@
 //@ts-ignore => someone fix this
 import { fork, IPty } from 'node-pty';
 import path from "path";
+import { buildShellEnv } from "./shellEnv";
 
 const SHELL = "bash";
 
@@ -19,7 +20,10 @@ export class TerminalManager {
         let term = fork(SHELL, [], {
             cols: 100,
             name: 'xterm',
-            cwd: this.cwd
+            cwd: this.cwd,
+            // Whitelisted, not the pod's full process.env - see shellEnv.ts.
+            // Also covers autorun.ts, which spawns through this same method.
+            env: buildShellEnv()
         });
 
         term.on('data', (data: string) => onData(data, term.pid));

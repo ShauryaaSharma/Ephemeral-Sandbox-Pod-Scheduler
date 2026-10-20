@@ -15,7 +15,7 @@ A browser-based code editor and terminal, like [Session Multiplexer Code Shell](
    - a **Service** exposing the pod's port `3001` (WebSocket) and `3000` (the user's own running app)
    - an **Ingress** routing `<replId>.<domain>` (two configured hostnames) to those ports
    - a **NetworkPolicy** scoping that pod's ingress/egress (see [Network policy](#network-policy))
-4. **Editing & terminal** : the frontend connects a Socket.IO client directly to `ws://<replId>.<domain>`, presenting its token in the handshake. The `runner` inside that specific pod identifies which project it's serving from the **subdomain in the request's Host header** (not a query param, since there's exactly one project per pod), and rejects the connection unless the token's owner matches the pod's own `OWNER_ID`. File read/write and terminal I/O work the same way as the single-host version, except everything happens inside `/workspace` (the volume the init container populated) rather than a shared local `tmp/` folder.
+4. **Editing & terminal** : the frontend connects a Socket.IO client directly to `ws://<replId>.<domain>`, presenting its token in the handshake. The `runner` inside that specific pod identifies which project it's serving from its own `REPL_ID` env var (injected by the orchestrator at pod-creation time - not the request's Host header, which is client-controlled and not trustworthy for this, and not a query param either, since there's exactly one project per pod), and rejects the connection unless the token's owner matches the pod's own `OWNER_ID`. File read/write and terminal I/O work the same way as the single-host version, except everything happens inside `/workspace` (the volume the init container populated) rather than a shared local `tmp/` folder, and every path is resolved and bounds-checked against `/workspace` before any filesystem or S3 access (see [Path safety](#path-safety)).
 5. **Live preview** : the frontend's Output panel points its iframe at `http://<replId>.<domain>`, which the Ingress routes to the pod's port `3000`. On boot, the runner also auto-detects the project type and runs its install+start command in the background (see [Automatic run step](#automatic-run-step)), so this is usually already live; the user can still run their own commands manually in the terminal too.
 
 ## Architecture
@@ -86,7 +86,7 @@ orchestrator-simple/
 runner/
   src/
     index.ts    # entrypoint — HTTP + WS server for a single pod; GET /health, POST /shutdown
-    ws.ts        # Socket.IO handlers — replId derived from Host header, tracks last-activity
+    ws.ts        # Socket.IO handlers — replId from REPL_ID env, tracks last-activity
     auth.ts      # JWT verify (validates the socket handshake against OWNER_ID)
     autorun.ts   # detects project type in /workspace, auto-runs install+start on pod boot
     sync.ts      # recursively re-syncs /workspace to S3/R2 on /shutdown or SIGTERM
@@ -139,7 +139,7 @@ Update the `image:` field in `orchestrator-simple/service.yaml` to match.
 
 Edit `orchestrator-simple/service.yaml`:
 - set your registry image
-- replace the ingress-controller namespace label in the `NetworkPolicy` doc if yours isn't `ingress-nginx`, and fill in your cluster's pod/service CIDRs (see comments in the file, and [Network policy](#network-policy) below)
+- replace the ingress-controller namespace label in the `NetworkPolicy` doc if yours isn't `ingress-nginx` - the pod/service CIDRs no longer need editing here directly, set `POD_CIDR`/`SERVICE_CIDR` on `orchestrator-simple` instead (see comments in the file, and [Network policy](#network-policy) below)
 - `S3_BUCKET` / `S3_ENDPOINT` on the `runner` container are literal placeholder values in the template — edit them directly, same as the image above
 
 The Ingress hostnames are **not** edited directly anymore - `ws_domain_placeholder`/`app_domain_placeholder` are substituted at `/start` time from orchestrator-simple's `WS_DOMAIN`/`APP_DOMAIN` env vars (step 5), the same mechanism already used for `service_name`. This is what makes the domains config-driven instead of baked into the committed template - see [Configurable domains](#configurable-domains).
@@ -148,16 +148,26 @@ The Ingress hostnames are **not** edited directly anymore - `ws_domain_placehold
 
 ### 3. Create the credentials Secret
 
-Real credentials no longer live in `service.yaml` — they're read from a Kubernetes `Secret` at pod-creation time via `secretKeyRef`. Create it with the provided script (never commit the filled-in values):
+Real credentials no longer live in `service.yaml` — they're read from Kubernetes `Secret`s at pod-creation time via `secretKeyRef`/`secretRef`.
+
+**Generating the JWT key pair**: session tokens are signed with an asymmetric RS256 key pair, not a shared symmetric secret — only `init-service` ever holds the private key; `orchestrator-simple` and `runner` only get the public key and can only verify tokens, never mint them.
+
+```bash
+openssl genrsa -out jwt-private.pem 2048
+openssl rsa -in jwt-private.pem -pubout -out jwt-public.pem
+```
+
+Then create both Secrets with the provided script (never commit the filled-in values or the `.pem` files):
 
 ```bash
 export AWS_ACCESS_KEY_ID=...
 export AWS_SECRET_ACCESS_KEY=...
-export JWT_SECRET=$(openssl rand -hex 32)   # must be the same value used by init-service/orchestrator-simple below
+export JWT_PRIVATE_KEY="$(cat jwt-private.pem)"
+export JWT_PUBLIC_KEY="$(cat jwt-public.pem)"
 ./k8s/create-secret.sh   # defaults to the "default" namespace; pass one as an arg otherwise
 ```
 
-This creates a single `sandbox-secrets` Secret with `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `JWT_SECRET` keys, referenced by both the init container and the `runner` container in `service.yaml`.
+This creates a `sandbox-secrets` Secret with `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `JWT_PUBLIC_KEY` keys (copied into every project namespace and referenced by the `runner` container), and a separate `init-service-secrets` Secret with `JWT_PRIVATE_KEY` (referenced only by `init-service`'s own deployment in `k8s/scheduler-services.yaml` — never copied into a project namespace).
 
 ### 4. Install the ingress controller
 
@@ -167,7 +177,7 @@ kubectl apply -f k8s/ingress-controller.yaml
 
 ### 5. Run the services
 
-`init-service` and `orchestrator-simple` both need the **same** `JWT_SECRET` (used to sign/verify anonymous session tokens) and the **same** `OWNERSHIP_DB_PATH` (a shared SQLite file recording which user owns which `replId` — see [Auth & ownership](#auth--ownership)).
+`init-service` needs `JWT_PRIVATE_KEY` (to sign anonymous session tokens); `orchestrator-simple` needs the matching `JWT_PUBLIC_KEY` (to verify them) — see [Generating the JWT key pair](#3-create-the-credentials-secret). Both also need the **same** `OWNERSHIP_DB_PATH` (a shared SQLite file recording which user owns which `replId` — see [Auth & ownership](#auth--ownership)).
 
 **Note the copy destination below**: `dotenv.config()` loads `.env` from the process's working directory (i.e. the service root when you run `npm run dev` from there), *not* from `src/`, even though the template lives at `src/.env.example`. Copying it to `src/.env` (an easy mistake - the original version of this README did exactly that) means none of these variables actually load.
 
@@ -175,13 +185,13 @@ kubectl apply -f k8s/ingress-controller.yaml
 # init-service
 cd init-service
 npm install
-cp src/.env.example .env   # fill in S3_BUCKET, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, S3_ENDPOINT, JWT_SECRET, OWNERSHIP_DB_PATH
+cp src/.env.example .env   # fill in S3_BUCKET, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, S3_ENDPOINT, JWT_PRIVATE_KEY, OWNERSHIP_DB_PATH
 npm run dev                     # :3001
 
 # orchestrator-simple
 cd orchestrator-simple
 npm install
-cp src/.env.example .env   # same JWT_SECRET and OWNERSHIP_DB_PATH as init-service
+cp src/.env.example .env   # JWT_PUBLIC_KEY matching init-service's JWT_PRIVATE_KEY, same OWNERSHIP_DB_PATH
 npm run dev                     # :3002 — needs kubeconfig access to your cluster (loadFromDefault())
 ```
 
@@ -209,7 +219,8 @@ Everything above runs over plain HTTP. To serve `<replId>.<domain>` over HTTPS, 
 | `S3_ENDPOINT` | init-service, runner | Override for S3-compatible storage (e.g. Cloudflare R2) |
 | `PORT` | init-service, orchestrator-simple, runner | Service port (defaults: `3001`, `3002`, `3001`) |
 | `REPL_ID` | runner | The project's `replId`, injected by the orchestrator via the same `service_name` substitution used elsewhere in `service.yaml`. Used to label the auto-run terminal session in logs. |
-| `JWT_SECRET` | init-service, orchestrator-simple, runner | Shared HMAC secret for signing/verifying anonymous session tokens. **Must be identical across all three services.** Generate with e.g. `openssl rand -hex 32`. |
+| `JWT_PRIVATE_KEY` | init-service | RS256 private key (PEM) used to **sign** anonymous session tokens. Only init-service has this. See [Generating the JWT key pair](#3-create-the-credentials-secret). |
+| `JWT_PUBLIC_KEY` | orchestrator-simple, runner | RS256 public key (PEM) used to **verify** tokens signed by `JWT_PRIVATE_KEY`. Neither service can mint tokens with this. |
 | `OWNER_ID` | runner | The verified owner's user id, injected by the orchestrator at pod-creation time (from the ownership row it already checked in `POST /start`). The runner's socket handshake rejects any token whose `userId` doesn't match this. |
 | `OWNERSHIP_DB_PATH` | init-service, orchestrator-simple | Path to the shared SQLite file mapping `replId` → owning user. Defaults to `<repo root>/data/ownership.db`, which only works if both services run on the same host/volume - see the trade-off note below. |
 | `WS_DOMAIN` / `APP_DOMAIN` | orchestrator-simple | The two domains projects are reachable at - `<replId>.<WS_DOMAIN>` for the terminal/editor socket (default `peetcode.com`), `<replId>.<APP_DOMAIN>` for the user's running app (default `autogpt-cloud.com`). Substituted into `service.yaml`'s Ingress at `/start` time; `WS_DOMAIN` is also used directly to reach a pod's `/shutdown`/`/health`. See [Configurable domains](#configurable-domains). |
@@ -219,6 +230,16 @@ Everything above runs over plain HTTP. To serve `<replId>.<domain>` over HTTPS, 
 | `CRASH_RESTART_THRESHOLD` | orchestrator-simple | Restart count at which a pod is considered crash-looping, even without an explicit `CrashLoopBackOff` reason yet. Default `5`. |
 | `ALERT_WEBHOOK_URL` | orchestrator-simple | Optional Slack-compatible webhook (`{text: "..."}`) fired when a project starts crash-looping. Unset = no alerting. |
 | `RATE_LIMIT_MAX` / `RATE_LIMIT_WINDOW_SECONDS` | init-service, orchestrator-simple | Per-user token-bucket rate limit on `POST /project` / `POST /start` - burst size (default `5`) and refill window in seconds (default `60`). See [Rate limiting](#rate-limiting). |
+| `AWS_STS_ROLE_ARN` | orchestrator-simple | IAM role ARN to assume (`sts:AssumeRole`) for per-project, prefix-scoped S3 credentials. Unset = legacy bucket-wide fallback. See [Scoped S3 credentials](#scoped-s3-credentials). |
+| `AWS_STS_SESSION_DURATION_SECONDS` | orchestrator-simple | How long a project's STS session credentials are valid for. Default `3600` (1h). Not refreshed mid-session - see [Scoped S3 credentials](#scoped-s3-credentials). |
+| `AWS_SESSION_TOKEN` | runner, init container | STS session token, present only when the pod was issued per-project scoped credentials (see above). Unset in the legacy fallback. |
+| `WORKSPACE_STORAGE_REQUEST` / `WORKSPACE_STORAGE_LIMIT` | orchestrator-simple | `/workspace`'s disk ceiling - substituted into `service.yaml`'s `emptyDir` `sizeLimit` and both containers' `ephemeral-storage` requests/limits. Defaults `512Mi`/`1Gi`. |
+| `INTERNAL_API_TOKEN` | orchestrator-simple, runner | Shared secret gating the runner's internal `/health`/`/shutdown` endpoints - sent as `x-internal-token` by `stop.ts`/`reaper.ts`, checked with `crypto.timingSafeEqual`. **Must be identical in both.** Generate with e.g. `openssl rand -hex 32`. |
+| `ALLOWED_ORIGINS` | init-service, orchestrator-simple, runner | Comma-separated frontend origin(s) allowed by CORS (and, for the runner, the Socket.IO handshake). **Required when `NODE_ENV=production`** (startup fails otherwise); defaults to `http://localhost:5173` in development. `orchestrator-simple` also substitutes its own value into every project pod's `ALLOWED_ORIGINS` at `/start` time - set it once there, not per-service. |
+| `NODE_ENV` | init-service, orchestrator-simple, runner | Standard Node env flag - `production` enforces `ALLOWED_ORIGINS` being set (see above). |
+| `MAX_FILE_UPDATE_BYTES` | runner | Max size accepted for a single `updateContent` (file save) payload. Default `1048576` (1MB); larger payloads are silently dropped (logged, no ack either way today). |
+| `ADMIN_USER_IDS` | orchestrator-simple | Comma-separated userIds allowed the cluster-wide view on `GET /status`/`GET /projects/:replId/status`. Unset (default) = every caller only sees their own projects. |
+| `POD_CIDR` / `SERVICE_CIDR` | orchestrator-simple | Cluster pod/service CIDRs, substituted into `service.yaml`'s `NetworkPolicy` egress exceptions. Defaults `10.42.0.0/16`/`10.43.0.0/16` (k3s). See [Network policy](#network-policy). |
 | `VITE_WS_DOMAIN` / `VITE_APP_DOMAIN` | frontend | Must match `WS_DOMAIN`/`APP_DOMAIN` above. Only need a `.env` at all if your domains differ from the defaults. |
 | `VITE_INIT_SERVICE_URL` / `VITE_ORCHESTRATOR_URL` | frontend | Full base URLs (protocol+host+port) for init-service/orchestrator-simple, wherever you deploy them. Defaults (`http://localhost:3001`/`:3002`) only work when running everything on one machine - **required** for any real deployment, since the frontend runs in the user's browser, not on your server. |
 | `VITE_USE_TLS` | frontend | Set to `"true"` once [TLS via cert-manager](#tls-via-cert-manager) is set up - switches the per-project socket/iframe connections from `ws`/`http` to `wss`/`https`. Default `false`. |
@@ -231,7 +252,7 @@ Everything above runs over plain HTTP. To serve `<replId>.<domain>` over HTTPS, 
 - **Graceful shutdown**: the runner exposes `POST /shutdown`, which recursively re-uploads every file under `/workspace` to S3/R2 (`runner/src/sync.ts`). This isn't recovering buffered writes - individual edits already sync to S3 immediately (see `ws.ts`'s `updateContent` handler) - it's a belt-and-suspenders pass covering any edit whose S3 write raced with pod teardown. The same sync also runs on `SIGTERM` as a safety net, in case a pod is torn down without `/stop` being called first (e.g. `kubectl delete pod` directly). Both paths are bounded to 8s internally, and orchestrator's call to `/shutdown` is bounded to 10s - a stuck or unreachable pod never blocks teardown, it just proceeds anyway and logs a warning.
 - **Idle-timeout reaper**: the runner tracks its own last-activity timestamp in memory (`ws.ts`, updated on connect and on every terminal/file event) and exposes it via `GET /health`. A background loop in orchestrator-simple (`src/reaper.ts`) polls every `REAPER_INTERVAL_SECONDS` for all projects it thinks are running, refreshes their last-active time from `/health`, and calls the same stop-with-sync logic on anything idle longer than `IDLE_TIMEOUT_MINUTES` - logging `[reaper] AUTO-TEARDOWN ...` so it's auditable. A pod that's temporarily unreachable doesn't get force-reaped off one failed check; the reaper falls back to the last known activity time instead.
 - Project status (`created` / `started` / `stopped`) and last-active time live in the same SQLite ownership table from Priority 2, with a migration that adds these columns to a pre-existing DB file if needed.
-- **Trade-off**: `/shutdown` and `/health` are not token-gated like the rest of the API (see [Auth & ownership](#auth--ownership)) - they're internal, orchestrator-only endpoints reachable at the same ingress host as the user-facing app. Worst case impact is low (an unauthenticated caller can force an early resync or read a timestamp, nothing destructive), but a shared internal secret would be a natural hardening step if this matters for your deployment.
+- **`/shutdown` and `/health` require an internal token.** They're internal, orchestrator-only endpoints reachable at the same ingress host as the user-facing app, so both require an `x-internal-token` header equal to `INTERNAL_API_TOKEN` (compared with `crypto.timingSafeEqual`), returning `401` otherwise. Only `orchestrator-simple`'s `stop.ts`/`reaper.ts` send this header; the shared secret itself is never exposed to the user's own terminal (see the env whitelist in [runner/src/pty.ts](runner/src/pty.ts)/`shellEnv.ts`).
 - **Not implemented**: pod pre-warming (Priority 3's explicit stretch goal) - deferred since 1-3 needed to be solid first, and warm-pool management is a meaningfully bigger scope than the rest of this tier.
 
 ## Monitoring & guardrails
@@ -239,16 +260,15 @@ Everything above runs over plain HTTP. To serve `<replId>.<domain>` over HTTPS, 
 - **Per-pod resource usage** (`orchestrator-simple/src/monitor.ts`): reads live CPU/memory from the Kubernetes Metrics API (`metrics.k8s.io`, via `@kubernetes/client-node`'s `Metrics` client), not just the static `resources.limits` already in the manifest. **Requires `metrics-server` installed in your cluster** - if it's not, this fails closed (returns `null` per project) rather than breaking health checks or `/status`.
 - **Crash-loop / OOM detection** (`src/healthMonitor.ts`): a background loop, separate from the idle reaper, checks every started project's pod status via the Kubernetes API every `HEALTH_CHECK_INTERVAL_SECONDS`. A pod is considered crash-looping if its container reports the `CrashLoopBackOff` waiting reason **or** its restart count reaches `CRASH_RESTART_THRESHOLD` (whichever fires first - the threshold catches the slower-burning case where kubelet hasn't reported that reason yet). `OOMKilled` is detected separately from the container's last-terminated reason and reported alongside.
 - **Throttled response, not silent auto-restart**: this project never restarts pods itself (kubelet already owns that via `restartPolicy`). What "stop trying to auto-recover" means here concretely: once a project crosses the crash-loop threshold, it's marked `unhealthy` in the ownership table (a `health_status` column, orthogonal to the `started`/`stopped` lifecycle `status` - a pod can be started *and* unhealthy at the same time) and stops being silently treated as fine. Recovery is automatic and symmetric: the next check that finds the pod no longer crash-looping flips it back to `healthy`.
-- **`GET /status`** (orchestrator-simple, auth required, **not** ownership-scoped - see trade-off below): the cluster-wide operational view - total active pods, unhealthy count, each active project's health/restart-count/resource-usage, recent auto-teardowns (from the idle reaper), and recent crash-loop alerts.
-- **`GET /projects/:replId/status`**: the ownership-scoped counterpart, for the frontend - returns just one project's lifecycle status, health status, restart count, and reason. `CodingPage.tsx` polls this every 20s and shows a banner ("this project's pod is unhealthy...") when it comes back unhealthy, instead of a silently broken terminal.
+- **`GET /status`** (orchestrator-simple, auth required, ownership-scoped by default): returns only the caller's own active pods - total count, unhealthy count, each one's health/restart-count/resource-usage, and only that caller's recent auto-teardowns/crash-loop alerts. Set `ADMIN_USER_IDS` (comma-separated userIds) to opt specific users into the old cluster-wide view instead.
+- **`GET /projects/:replId/status`**: the single-project counterpart, for the frontend - returns just one project's lifecycle status, health status, restart count, and reason. Also ownership-scoped (403 for a project you don't own), with the same `ADMIN_USER_IDS` bypass. `CodingPage.tsx` polls this every 20s and shows a banner ("this project's pod is unhealthy...") when it comes back unhealthy, instead of a silently broken terminal.
 - **Alerting webhook** (optional): set `ALERT_WEBHOOK_URL` to a Slack incoming-webhook URL (or any endpoint that accepts `{text: "..."}` - Discord and log-sink proxies both work this way) and a message fires the moment a project crosses into `unhealthy`. No webhook configured = alerts still land in `/status` and logs, just no push notification.
-- **Trade-off**: `/status` requires a valid token but isn't restricted to an admin role (there is no role concept in this project) - any authenticated caller can see every project's `replId`/`ownerId`/health data, not just their own. Acceptable for a portfolio-scale deployment; real multi-tenant use would need an admin flag on top of the existing auth.
 
 ## Auth & ownership
 
 There is no login/password/email anywhere in this project - adding real user accounts was out of scope. Instead:
 
-1. On first load, the frontend calls `POST /auth/session` on `init-service` (no auth required - this **is** the bootstrap), which generates a random `userId` (`crypto.randomUUID()`), signs a JWT `{ userId }`, and returns it. The frontend caches this token in `localStorage` and sends it as `Authorization: Bearer <token>` on `/project` and `/start`, and as `{ auth: { token } }` on the Socket.IO connection to the pod.
+1. On first load, the frontend calls `POST /auth/session` on `init-service` (no auth required - this **is** the bootstrap), which generates a random `userId` (`crypto.randomUUID()`), signs a JWT `{ userId }` with its `JWT_PRIVATE_KEY` (RS256), and returns it. The frontend caches this token in `localStorage` and sends it as `Authorization: Bearer <token>` on `/project` and `/start`, and as `{ auth: { token } }` on the Socket.IO connection to the pod. `orchestrator-simple` and the `runner` pod only ever hold the matching `JWT_PUBLIC_KEY` and can verify a token but never mint one.
 2. `POST /project` (init-service) requires a valid bearer token, rejects a `replId` that's already taken (409), and records `(replId, ownerId, createdAt)` in a shared SQLite table.
 3. `POST /start` (orchestrator-simple) requires a valid bearer token, looks up the `replId`'s owner, and rejects with `404` if the project doesn't exist or `403` if the caller isn't the owner. On success, it injects the verified `ownerId` into the pod as `OWNER_ID` (same substitution mechanism as `REPL_ID`) - no DB access needed inside the pod itself.
 4. The runner's Socket.IO connection handler verifies the token in the handshake (`socket.handshake.auth.token`) and disconnects unless the token's `userId` matches the pod's own `OWNER_ID`.
@@ -256,6 +276,12 @@ There is no login/password/email anywhere in this project - adding real user acc
 **This is intentionally a lightweight, anonymous, device-bound identity, not a real auth system** - a token just proves "the same browser that created this project is asking again." Clearing `localStorage` forfeits access to your own projects (no recovery mechanism), and there's no protection against someone deliberately exporting/sharing their token. Swapping in a real identity provider later would only require changing how `/auth/session` issues tokens - everything downstream (the bearer-token middleware, the ownership table, the socket check) stays the same.
 
 **Trade-off on `OWNERSHIP_DB_PATH`:** init-service and orchestrator-simple both read/write the same SQLite file directly rather than one service calling the other's API. That's the lightest option for two services that, today, are expected to run on the same host - but it means they **must** share a filesystem. If you deploy them on separate hosts/containers, either point `OWNERSHIP_DB_PATH` at a shared volume, or (better, for real multi-host deployment) replace the direct file access with a tiny internal ownership API that one service exposes and the other calls.
+
+## Path safety
+
+Every `fetchDir`/`fetchContent`/`updateContent` call goes through `resolveInWorkspace` (`runner/src/fs.ts`) before touching the filesystem: it joins the caller-supplied path onto `/workspace` and rejects the result unless it still resolves inside `/workspace` (e.g. a `../../etc/passwd`-style traversal). `updateContent`'s S3 key is built from that same resolved path, not the raw client-supplied string, so a traversal attempt can't produce a different S3 key than the file it actually wrote to on disk. `updateContent` also rejects payloads over `MAX_FILE_UPDATE_BYTES` (default 1MB).
+
+The runner also no longer trusts the Socket.IO connection's Host header to determine which project it's serving - that header is entirely client-controlled, so a client that could reach the pod directly (bypassing the ingress's subdomain routing) could previously claim to be any project. It now reads its own `REPL_ID` env var instead, injected by the orchestrator at pod-creation time and identical to what every other per-pod identity check (`OWNER_ID`, `/health`, autorun) already relies on.
 
 ## Automatic run step
 
@@ -275,11 +301,12 @@ This never blocks or crashes pod startup — detection and command failures are 
 Each project's Deployment/Service/Ingress is now accompanied by a fourth manifest doc, a `NetworkPolicy` scoped to that pod (`app: <replId>`), created and torn down the same way as the others:
 
 - **Ingress**: only the ingress controller (namespace `ingress-nginx` by default - matches `k8s/ingress-controller.yaml`) may reach the pod's ports `3001`/`3000`. Every other pod, including other projects' runner pods, is blocked from connecting directly.
-- **Egress**: DNS is allowed unconditionally (needed for S3/R2 and npm/pip registries); everything else is allowed **except** the cluster's own pod and service CIDRs - which is what stops a pod from reaching another project's pod or the Kubernetes API server, while still permitting normal internet access (installs, S3/R2).
+- **Egress**: DNS is allowed unconditionally (needed for S3/R2 and npm/pip registries); everything else is allowed **except** the cloud metadata endpoint (`169.254.169.254/32` - the classic SSRF-to-instance-credential-theft target on AWS/GCP/Azure), the RFC1918 private ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), and the cluster's own pod/service CIDRs - which together stop a pod from reaching another project's pod, the Kubernetes API server, the cloud metadata service, or anything else on the cluster's private network, while still permitting normal internet access (installs, S3/R2).
 
-Two things to check before relying on this:
+Things to check before relying on this:
 - **Your CNI must enforce `NetworkPolicy`.** Calico, Cilium, and Weave Net do; plain flannel does **not** - the objects get created but silently ignored. If you're on flannel, switch to Canal or a policy-enforcing CNI.
-- **The CIDR placeholders are generic kubeadm defaults** (`10.244.0.0/16` pod CIDR, `10.96.0.0/12` service CIDR) and will be wrong for many managed clusters (EKS/GKE/AKS/k3s all differ). Confirm yours (`kubectl cluster-info dump | grep -m1 cluster-cidr`, and check your provider's docs for the service CIDR) and edit `orchestrator-simple/service.yaml` before relying on this in production.
+- **The pod/service CIDRs are configurable**, not hardcoded into the committed template - `POD_CIDR`/`SERVICE_CIDR` env vars on `orchestrator-simple` (default `10.42.0.0/16`/`10.43.0.0/16`, k3s's defaults), substituted into `service.yaml` at `/start` time the same way `WS_DOMAIN`/`APP_DOMAIN` are. Confirm yours (`kubectl cluster-info dump | grep -m1 cluster-cidr`, and check your provider's docs for the service CIDR - EKS/GKE/AKS/k3s all differ) rather than relying on the defaults in production.
+- **This is IP/CIDR-level only, not an FQDN allowlist.** Any public IP is still reachable (needed for npm/pip registries and S3/R2, which this policy can't name by hostname). Restricting egress to only the actual hostnames those need requires a CNI with FQDN-based `NetworkPolicy` support (e.g. Cilium) or an egress proxy - **not implemented in this repo**.
 
 ## Namespace isolation
 
@@ -290,6 +317,20 @@ Every project now gets its own Kubernetes namespace (`sandbox-<replId>`, `orches
 - The crash-loop health monitor and resource-usage checks look up pods in the project's own namespace, not `default`.
 - **Trade-off**: namespace deletion is asynchronous in Kubernetes (a `Terminating` phase with finalizers) - this repo's `deleteNamespace` call returning doesn't mean the namespace is actually gone yet. A rapid stop-then-immediately-restart of the *same* `replId` can hit a conflict creating the new namespace while the old one is still terminating. In practice this resolves itself within seconds to a couple minutes; there's no special handling for it here (a fixed retry-with-backoff on `ensureNamespace` would be the natural next step if this becomes a real pain point).
 - **RBAC trade-off**: see the note in [Getting started, step 2](#2-configure-the-manifest-template) - this needs cluster-scoped permissions now, not a namespace-scoped Role.
+
+## Scoped S3 credentials
+
+By default (if `AWS_STS_ROLE_ARN` is unset), every project's pod is handed the same bucket-wide `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` from `sandbox-secrets` - **this mode is not isolated per project**: a malicious user's pod can read or write any other project's files in the bucket, not just their own.
+
+Setting `AWS_STS_ROLE_ARN` (an IAM role `orchestrator-simple` can `sts:AssumeRole`) turns this on:
+
+1. At `POST /start`, `orchestrator-simple` (`src/sts.ts`) calls `AssumeRole` with a session policy restricting the resulting temporary credentials to `s3:GetObject`/`PutObject` on `code/<replId>/*` and `s3:ListBucket` on the bucket with an `s3:prefix` condition matching that same prefix - nothing else in the bucket is reachable.
+2. The temporary `AccessKeyId`/`SecretAccessKey`/`SessionToken` are written to a `sandbox-project-credentials` Secret in that project's own namespace (next to the copied `sandbox-secrets`), which both the init container and the `runner` container read via `secretKeyRef` (the manifest's `aws_credentials_secret_placeholder` is substituted to this Secret's name instead of `sandbox-secrets`).
+3. `namespace.ts`'s `ensureNamespace` only copies the bucket-wide AWS keys into a project's `sandbox-secrets` Secret when STS is **not** configured - when it is, that Secret only ever carries `JWT_PUBLIC_KEY` into the namespace, and the pod's actual S3 credentials come from the scoped Secret above.
+
+`orchestrator-simple` itself needs its own AWS identity capable of `sts:AssumeRole` on the configured role - wherever it runs (a plain credential-chain lookup via the AWS SDK: env vars, a shared credentials file, an EC2 instance profile, or IRSA on EKS). This repo doesn't provision that identity or the IAM role/trust policy for you - see "Needs your decision" in any security review of this feature.
+
+**Trade-off**: the STS session (default `AWS_STS_SESSION_DURATION_SECONDS=3600`, 1h) is not refreshed mid-session - a project open longer than that keeps working for everything already cached, but a fresh S3 call after expiry will start failing with an expired-credentials error until the project is restarted (which re-assumes a fresh session). Raise the duration (up to your role's `MaxSessionDuration`) or restart long-running projects periodically until this is addressed.
 
 ## Cluster capacity & retries
 
@@ -390,10 +431,10 @@ VITE_ORCHESTRATOR_URL=http://api.peetcode.com
 - **No frontend "Stop" button.** `POST /stop` exists and is fully wired up, but nothing in the UI calls it yet - today it's reachable but not user-facing.
 - **No pod pre-warming.** Cold starts pay the full init-container S3 copy + image pull cost every time; this was explicitly deferred as a stretch goal (see [Lifecycle](#lifecycle-stop-graceful-shutdown-idle-timeout)).
 - **Resource usage monitoring requires `metrics-server`.** Without it, CPU/memory numbers in `/status` are always `null` (fails closed, doesn't break anything else) - the static `resources.limits` in the manifest are still enforced by Kubernetes itself either way, this only affects the *visibility* into usage.
-- **`/status` isn't admin-scoped.** Any authenticated (anonymous) caller can see every project's health/resource data cluster-wide, not just their own - see the trade-off note under [Monitoring & guardrails](#monitoring--guardrails).
 - **`/start` has an unavoidable ~4-8s capacity-check delay**, and a rapid stop-then-restart of the same `replId` can occasionally race a still-terminating namespace - see [Cluster capacity & retries](#cluster-capacity--retries) and [Namespace isolation](#namespace-isolation).
 - **Rate-limit buckets are in-memory, per-process** - reset on restart, not shared across replicas. See [Rate limiting](#rate-limiting).
 - **No queued-start pattern.** A cluster with no capacity returns a clear `503` (see [Cluster capacity & retries](#cluster-capacity--retries)), but the client has to retry itself - there's no server-side queue that automatically starts the project once capacity frees up.
+- **S3 credential isolation is opt-in.** Without `AWS_STS_ROLE_ARN` set, every project's pod shares the same bucket-wide credentials - see [Scoped S3 credentials](#scoped-s3-credentials) for the opt-in per-project-scoped alternative and its own trade-off (STS sessions aren't refreshed mid-session).
 - **TLS is opt-in and cluster-wide, not per-project.** Every project shares one wildcard certificate rather than getting its own - see [TLS via cert-manager](#tls-via-cert-manager) for why, and note it's commented out by default so a fresh setup isn't forced through the cert-manager steps just to get HTTP working.
 
 This repo is the second iteration of [Session Multiplexer Code Shell](#), Same editor/terminal experience, rebuilt around per-project Kubernetes scheduling instead of a single shared host.
@@ -529,7 +570,6 @@ A honest tally across all six priority tiers, since the brief specifically asked
 - **Pod pre-warming** (Priority 3's stretch goal) - warm-pool management (claim/release, relabeling, a pre-creation loop against an empty workspace) is a meaningfully larger subsystem than anything else in this list; deferred until 1-3 were solid, per the brief's own instruction, and never circled back to given the scope already covered.
 - **Queued-start pattern** (Priority 5's heavier alternative to retry-with-backoff) - would need a real queue, a worker, and client-side polling for "still starting"; the brief explicitly offered retry-with-backoff as the lighter option.
 - **Frontend "Stop" button** - `POST /stop` is fully functional and tested, just not called from the UI. Small, deliberately left for whoever picks this up next since it wasn't explicitly required by any tier's task list.
-- **Admin-scoped `/status`** - there's no role/admin concept anywhere in this project's auth model, so the cluster-wide status view is available to any authenticated (anonymous) caller, not just operators. Documented as a trade-off rather than built around, since adding roles would be a real feature addition beyond what any tier asked for.
 
 **Real constraints worth knowing about, not bugs**:
 - init-service and orchestrator-simple share a SQLite file on the same filesystem/host - there's no message queue or shared hosted DB, by design, for this project's scale.

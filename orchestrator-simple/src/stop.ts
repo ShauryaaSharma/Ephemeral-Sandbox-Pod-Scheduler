@@ -9,6 +9,14 @@ import { deleteProjectNamespace } from "./namespace";
 const WS_DOMAIN = process.env.WS_DOMAIN ?? "peetcode.com";
 const SHUTDOWN_TIMEOUT_MS = 10_000;
 
+// Gates the runner's /shutdown (see runner/src/index.ts) - without this
+// header, any caller reaching a pod's public ingress host could force an
+// early resync.
+const INTERNAL_API_TOKEN = process.env.INTERNAL_API_TOKEN;
+if (!INTERNAL_API_TOKEN) {
+    throw new Error("INTERNAL_API_TOKEN environment variable is required");
+}
+
 interface K8sApis {
     coreV1Api: CoreV1Api;
 }
@@ -18,7 +26,10 @@ export function createStopper(apis: K8sApis) {
         // Best-effort final sync, bounded so a stuck/unreachable pod can't
         // block teardown indefinitely - proceed regardless of the outcome.
         try {
-            await axios.post(`http://${replId}.${WS_DOMAIN}/shutdown`, {}, { timeout: SHUTDOWN_TIMEOUT_MS });
+            await axios.post(`http://${replId}.${WS_DOMAIN}/shutdown`, {}, {
+                timeout: SHUTDOWN_TIMEOUT_MS,
+                headers: { "x-internal-token": INTERNAL_API_TOKEN },
+            });
         } catch (err) {
             console.warn(
                 `[stop] final sync for ${replId} failed or timed out, proceeding with teardown anyway:`,

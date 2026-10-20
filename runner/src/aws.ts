@@ -5,6 +5,11 @@ import path from "path";
 const s3 = new S3({
     accessKeyId: process.env.AWS_ACCESS_KEY_ID,
     secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+    // Set when orchestrator-simple issued this pod per-project STS-scoped
+    // credentials instead of the legacy bucket-wide keys - see
+    // orchestrator-simple/src/sts.ts. Undefined (ignored by the SDK) in the
+    // legacy fallback.
+    sessionToken: process.env.AWS_SESSION_TOKEN,
     endpoint: process.env.S3_ENDPOINT,
     // Required for any S3-compatible endpoint that isn't AWS itself (R2,
     // MinIO, etc.) - without this the SDK defaults to virtual-hosted-style
