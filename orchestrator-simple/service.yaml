@@ -49,7 +49,9 @@ spec:
             sizeLimit: workspace_storage_limit_placeholder
       initContainers:
         - name: copy-s3-resources
-          image: amazon/aws-cli
+          # Pinned (not :latest) so a new push to this image can't silently
+          # change what runs in every project pod's init container.
+          image: amazon/aws-cli:2.38.2
           # Uses the pod-level securityContext's uid/gid (1000) - the files
           # it writes into /workspace end up group-owned by fsGroup 1000,
           # which both the runner container (gid 1000, see below) and every

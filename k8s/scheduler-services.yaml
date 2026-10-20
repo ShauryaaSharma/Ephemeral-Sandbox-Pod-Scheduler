@@ -78,6 +78,11 @@ spec:
     spec:
       # No Kubernetes API access needed - init-service only ever talks to S3/R2.
       automountServiceAccountToken: false
+      # fsGroup matches the image's "app" user (uid/gid 1000, see
+      # init-service/Dockerfile) so that uid can write /data/ownership.db on
+      # the PVC regardless of the volume's own default ownership.
+      securityContext:
+        fsGroup: 1000
       volumes:
         - name: ownership-db
           persistentVolumeClaim:
@@ -85,6 +90,15 @@ spec:
       containers:
         - name: init-service
           image: <your-registry>/init-service:latest
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
           ports:
             - containerPort: 3001
           envFrom:
@@ -126,6 +140,12 @@ spec:
         app: orchestrator-simple
     spec:
       serviceAccountName: sandbox-orchestrator # see k8s/rbac.yaml
+      # fsGroup matches the image's "app" user (uid/gid 1000, see
+      # orchestrator-simple/Dockerfile) so that uid can write
+      # /data/ownership.db on the PVC regardless of the volume's own default
+      # ownership.
+      securityContext:
+        fsGroup: 1000
       volumes:
         - name: ownership-db
           persistentVolumeClaim:
@@ -133,6 +153,15 @@ spec:
       containers:
         - name: orchestrator-simple
           image: <your-registry>/orchestrator-simple:latest
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
           ports:
             - containerPort: 3002
           envFrom:
