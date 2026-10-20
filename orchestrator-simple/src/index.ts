@@ -36,6 +36,12 @@ app.use(cors());
 // stop.ts/reaper.ts and the frontend's VITE_WS_DOMAIN).
 const WS_DOMAIN = process.env.WS_DOMAIN ?? "peetcode.com";
 const APP_DOMAIN = process.env.APP_DOMAIN ?? "autogpt-cloud.com";
+// /workspace's disk ceiling - same mechanism as the domains above (plain
+// string substitution into service.yaml, not baked into the committed
+// template). Applies to the emptyDir's own sizeLimit and both containers'
+// ephemeral-storage requests/limits.
+const WORKSPACE_STORAGE_REQUEST = process.env.WORKSPACE_STORAGE_REQUEST ?? "512Mi";
+const WORKSPACE_STORAGE_LIMIT = process.env.WORKSPACE_STORAGE_LIMIT ?? "1Gi";
 
 const kubeconfig = new KubeConfig();
 kubeconfig.loadFromDefault();
@@ -102,6 +108,8 @@ app.post("/start", requireAuth, rateLimit, async (req, res) => {
             ws_domain_placeholder: WS_DOMAIN,
             app_domain_placeholder: APP_DOMAIN,
             aws_credentials_secret_placeholder: awsCredentialsSecretName,
+            workspace_storage_request_placeholder: WORKSPACE_STORAGE_REQUEST,
+            workspace_storage_limit_placeholder: WORKSPACE_STORAGE_LIMIT,
         });
         for (const manifest of kubeManifests) {
             switch (manifest.kind) {

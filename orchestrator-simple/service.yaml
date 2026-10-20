@@ -42,7 +42,8 @@ spec:
           type: RuntimeDefault
       volumes:
         - name: workspace-volume
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: workspace_storage_limit_placeholder
       initContainers:
         - name: copy-s3-resources
           image: amazon/aws-cli
@@ -94,6 +95,11 @@ spec:
           volumeMounts:
             - name: workspace-volume
               mountPath: /workspace
+          resources:
+            requests:
+              ephemeral-storage: workspace_storage_request_placeholder
+            limits:
+              ephemeral-storage: workspace_storage_limit_placeholder
       containers:
         - name: runner
           image: ghcr.io/shauryaasharma/runner:latest
@@ -143,7 +149,6 @@ spec:
             - name: workspace-volume
               mountPath: /workspace
           resources:
-            # Bounty $25 Use ephemeral-storage to add space limits here
             # Lowered from 1 CPU/1Gi to fit on a free-tier Micro node (956Mi
             # total RAM, shared with k3s itself + ingress-nginx) - found by
             # actually trying to schedule a pod here and hitting "Insufficient
@@ -153,9 +158,11 @@ spec:
             requests:
               cpu: "100m"
               memory: "256Mi"
+              ephemeral-storage: workspace_storage_request_placeholder
             limits:
               cpu: "500m"
               memory: "400Mi"
+              ephemeral-storage: workspace_storage_limit_placeholder
 
 ---
 apiVersion: v1
