@@ -45,6 +45,19 @@ const APP_DOMAIN = process.env.APP_DOMAIN ?? "autogpt-cloud.com";
 const WORKSPACE_STORAGE_REQUEST = process.env.WORKSPACE_STORAGE_REQUEST ?? "512Mi";
 const WORKSPACE_STORAGE_LIMIT = process.env.WORKSPACE_STORAGE_LIMIT ?? "1Gi";
 
+// Opt-in cluster-wide view on /status and /projects/:replId/status - unset
+// (the default) means every caller only ever sees their own projects.
+const ADMIN_USER_IDS = new Set(
+    (process.env.ADMIN_USER_IDS ?? "")
+        .split(",")
+        .map((id) => id.trim())
+        .filter(Boolean)
+);
+
+function isAdmin(userId: string | undefined): boolean {
+    return Boolean(userId) && ADMIN_USER_IDS.has(userId as string);
+}
+
 const kubeconfig = new KubeConfig();
 kubeconfig.loadFromDefault();
 const coreV1Api = kubeconfig.makeApiClient(CoreV1Api);
@@ -187,13 +200,12 @@ app.post("/stop", requireAuth, async (req, res) => {
     }
 });
 
-// Cluster-wide operational view. Not ownership-scoped (there's no admin/role
-// concept in this project) - any authenticated caller sees every project.
-// Fine for a portfolio-scale deployment; a real multi-tenant deployment
-// would want this restricted to an admin role.
+// Ownership-scoped by default - a caller only sees their own projects.
+// ADMIN_USER_IDS opts specific users into the old cluster-wide view.
 app.get("/status", requireAuth, async (req, res) => {
     try {
-        const active = getStartedProjects();
+        const admin = isAdmin(req.userId);
+        const active = getStartedProjects().filter((p) => admin || p.ownerId === req.userId);
         const unhealthy = active.filter((p) => p.healthStatus === "unhealthy");
 
         const projects = await Promise.all(
@@ -212,8 +224,8 @@ app.get("/status", requireAuth, async (req, res) => {
             totalActivePods: active.length,
             unhealthyCount: unhealthy.length,
             projects,
-            recentAutoTeardowns: getRecentAutoTeardowns(),
-            recentAlerts: getRecentAlerts(),
+            recentAutoTeardowns: getRecentAutoTeardowns().filter((e) => admin || e.ownerId === req.userId),
+            recentAlerts: getRecentAlerts().filter((e) => admin || e.ownerId === req.userId),
         });
     } catch (err) {
         // getPodResourceUsage already catches internally today, but this
@@ -235,7 +247,7 @@ app.get("/projects/:replId/status", requireAuth, async (req, res) => {
         res.status(404).send({ message: "Project not found" });
         return;
     }
-    if (project.ownerId !== req.userId) {
+    if (project.ownerId !== req.userId && !isAdmin(req.userId)) {
         res.status(403).send({ message: "You do not own this project" });
         return;
     }
