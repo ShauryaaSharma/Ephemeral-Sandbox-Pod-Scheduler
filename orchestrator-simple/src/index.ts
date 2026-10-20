@@ -17,6 +17,7 @@ import { withRetry, checkPodSchedulable, translateK8sError } from "./capacity";
 import { rateLimit } from "./rateLimit";
 import { assumeRoleForProject, isStsEnabled, writeProjectCredentialsSecret, PROJECT_CREDENTIALS_SECRET_NAME } from "./sts";
 import { ALLOWED_ORIGINS } from "./corsOrigins";
+import { isValidReplId } from "./validators";
 
 // Express 4 doesn't catch a rejected async route handler for you - an
 // unguarded await that throws becomes an unhandled rejection, which Node
@@ -73,8 +74,8 @@ const readAndParseKubeYaml = (filePath: string, substitutions: Record<string, st
 app.post("/start", requireAuth, rateLimit, async (req, res) => {
     const { replId } = req.body;
 
-    if (!replId) {
-        res.status(400).send({ message: "Bad request" });
+    if (!isValidReplId(replId)) {
+        res.status(400).send({ message: "Invalid replId: must match ^[a-z0-9]([a-z0-9-]{1,38}[a-z0-9])?$" });
         return;
     }
 
