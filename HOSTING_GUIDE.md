@@ -254,17 +254,17 @@ Edit `orchestrator-simple/service.yaml`:
 - `image: 100xdevs/runner:latest` → `image: ghcr.io/<your-github-username>/runner:latest`
 - `S3_BUCKET` value → your R2 bucket name
 - `S3_ENDPOINT` value → your R2 endpoint from step 2
-- In the `NetworkPolicy` block: the pod/service CIDR `except:` values — get your
-  cluster's actual pod CIDR with:
-  ```bash
-  kubectl cluster-info dump | grep -m1 cluster-cidr
-  ```
-  (k3s defaults to `10.42.0.0/16` for pods and `10.43.0.0/16` for services — likely
-  already correct unless you changed k3s's install flags, but confirm)
 
-The `ingress-nginx` namespace label in the `NetworkPolicy` and the
-`ws_domain_placeholder`/`app_domain_placeholder` Ingress hosts don't need editing —
-those are substituted automatically at `/start` time.
+The `ingress-nginx` namespace label in the `NetworkPolicy`, its pod/service CIDR
+`except:` values (`POD_CIDR`/`SERVICE_CIDR`, set on `orchestrator-simple` in step
+11 below), and the `ws_domain_placeholder`/`app_domain_placeholder` Ingress hosts
+don't need editing here — all substituted automatically at `/start` time. k3s
+defaults to `10.42.0.0/16` for pods and `10.43.0.0/16` for services (this repo's
+own defaults), so step 11 only needs `POD_CIDR`/`SERVICE_CIDR` set explicitly if
+your cluster differs — confirm with:
+```bash
+kubectl cluster-info dump | grep -m1 cluster-cidr
+```
 
 ---
 

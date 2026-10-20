@@ -44,6 +44,12 @@ const APP_DOMAIN = process.env.APP_DOMAIN ?? "autogpt-cloud.com";
 // ephemeral-storage requests/limits.
 const WORKSPACE_STORAGE_REQUEST = process.env.WORKSPACE_STORAGE_REQUEST ?? "512Mi";
 const WORKSPACE_STORAGE_LIMIT = process.env.WORKSPACE_STORAGE_LIMIT ?? "1Gi";
+// NetworkPolicy egress exceptions - same substitution mechanism as the
+// domains/storage above, instead of the committed template hardcoding
+// kubeadm/k3s-specific defaults. Confirm these for your actual cluster
+// (see the comment above the NetworkPolicy doc in service.yaml).
+const POD_CIDR = process.env.POD_CIDR ?? "10.42.0.0/16";
+const SERVICE_CIDR = process.env.SERVICE_CIDR ?? "10.43.0.0/16";
 
 // Opt-in cluster-wide view on /status and /projects/:replId/status - unset
 // (the default) means every caller only ever sees their own projects.
@@ -127,6 +133,8 @@ app.post("/start", requireAuth, rateLimit, async (req, res) => {
             workspace_storage_limit_placeholder: WORKSPACE_STORAGE_LIMIT,
             allowed_origins_placeholder: ALLOWED_ORIGINS.join(","),
             node_env_placeholder: process.env.NODE_ENV ?? "development",
+            pod_cidr_placeholder: POD_CIDR,
+            service_cidr_placeholder: SERVICE_CIDR,
         });
         for (const manifest of kubeManifests) {
             switch (manifest.kind) {

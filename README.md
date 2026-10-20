@@ -139,7 +139,7 @@ Update the `image:` field in `orchestrator-simple/service.yaml` to match.
 
 Edit `orchestrator-simple/service.yaml`:
 - set your registry image
-- replace the ingress-controller namespace label in the `NetworkPolicy` doc if yours isn't `ingress-nginx`, and fill in your cluster's pod/service CIDRs (see comments in the file, and [Network policy](#network-policy) below)
+- replace the ingress-controller namespace label in the `NetworkPolicy` doc if yours isn't `ingress-nginx` - the pod/service CIDRs no longer need editing here directly, set `POD_CIDR`/`SERVICE_CIDR` on `orchestrator-simple` instead (see comments in the file, and [Network policy](#network-policy) below)
 - `S3_BUCKET` / `S3_ENDPOINT` on the `runner` container are literal placeholder values in the template — edit them directly, same as the image above
 
 The Ingress hostnames are **not** edited directly anymore - `ws_domain_placeholder`/`app_domain_placeholder` are substituted at `/start` time from orchestrator-simple's `WS_DOMAIN`/`APP_DOMAIN` env vars (step 5), the same mechanism already used for `service_name`. This is what makes the domains config-driven instead of baked into the committed template - see [Configurable domains](#configurable-domains).
@@ -239,6 +239,7 @@ Everything above runs over plain HTTP. To serve `<replId>.<domain>` over HTTPS, 
 | `NODE_ENV` | init-service, orchestrator-simple, runner | Standard Node env flag - `production` enforces `ALLOWED_ORIGINS` being set (see above). |
 | `MAX_FILE_UPDATE_BYTES` | runner | Max size accepted for a single `updateContent` (file save) payload. Default `1048576` (1MB); larger payloads are silently dropped (logged, no ack either way today). |
 | `ADMIN_USER_IDS` | orchestrator-simple | Comma-separated userIds allowed the cluster-wide view on `GET /status`/`GET /projects/:replId/status`. Unset (default) = every caller only sees their own projects. |
+| `POD_CIDR` / `SERVICE_CIDR` | orchestrator-simple | Cluster pod/service CIDRs, substituted into `service.yaml`'s `NetworkPolicy` egress exceptions. Defaults `10.42.0.0/16`/`10.43.0.0/16` (k3s). See [Network policy](#network-policy). |
 | `VITE_WS_DOMAIN` / `VITE_APP_DOMAIN` | frontend | Must match `WS_DOMAIN`/`APP_DOMAIN` above. Only need a `.env` at all if your domains differ from the defaults. |
 | `VITE_INIT_SERVICE_URL` / `VITE_ORCHESTRATOR_URL` | frontend | Full base URLs (protocol+host+port) for init-service/orchestrator-simple, wherever you deploy them. Defaults (`http://localhost:3001`/`:3002`) only work when running everything on one machine - **required** for any real deployment, since the frontend runs in the user's browser, not on your server. |
 | `VITE_USE_TLS` | frontend | Set to `"true"` once [TLS via cert-manager](#tls-via-cert-manager) is set up - switches the per-project socket/iframe connections from `ws`/`http` to `wss`/`https`. Default `false`. |
@@ -300,11 +301,12 @@ This never blocks or crashes pod startup — detection and command failures are 
 Each project's Deployment/Service/Ingress is now accompanied by a fourth manifest doc, a `NetworkPolicy` scoped to that pod (`app: <replId>`), created and torn down the same way as the others:
 
 - **Ingress**: only the ingress controller (namespace `ingress-nginx` by default - matches `k8s/ingress-controller.yaml`) may reach the pod's ports `3001`/`3000`. Every other pod, including other projects' runner pods, is blocked from connecting directly.
-- **Egress**: DNS is allowed unconditionally (needed for S3/R2 and npm/pip registries); everything else is allowed **except** the cluster's own pod and service CIDRs - which is what stops a pod from reaching another project's pod or the Kubernetes API server, while still permitting normal internet access (installs, S3/R2).
+- **Egress**: DNS is allowed unconditionally (needed for S3/R2 and npm/pip registries); everything else is allowed **except** the cloud metadata endpoint (`169.254.169.254/32` - the classic SSRF-to-instance-credential-theft target on AWS/GCP/Azure), the RFC1918 private ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), and the cluster's own pod/service CIDRs - which together stop a pod from reaching another project's pod, the Kubernetes API server, the cloud metadata service, or anything else on the cluster's private network, while still permitting normal internet access (installs, S3/R2).
 
-Two things to check before relying on this:
+Things to check before relying on this:
 - **Your CNI must enforce `NetworkPolicy`.** Calico, Cilium, and Weave Net do; plain flannel does **not** - the objects get created but silently ignored. If you're on flannel, switch to Canal or a policy-enforcing CNI.
-- **The CIDR placeholders are generic kubeadm defaults** (`10.244.0.0/16` pod CIDR, `10.96.0.0/12` service CIDR) and will be wrong for many managed clusters (EKS/GKE/AKS/k3s all differ). Confirm yours (`kubectl cluster-info dump | grep -m1 cluster-cidr`, and check your provider's docs for the service CIDR) and edit `orchestrator-simple/service.yaml` before relying on this in production.
+- **The pod/service CIDRs are configurable**, not hardcoded into the committed template - `POD_CIDR`/`SERVICE_CIDR` env vars on `orchestrator-simple` (default `10.42.0.0/16`/`10.43.0.0/16`, k3s's defaults), substituted into `service.yaml` at `/start` time the same way `WS_DOMAIN`/`APP_DOMAIN` are. Confirm yours (`kubectl cluster-info dump | grep -m1 cluster-cidr`, and check your provider's docs for the service CIDR - EKS/GKE/AKS/k3s all differ) rather than relying on the defaults in production.
+- **This is IP/CIDR-level only, not an FQDN allowlist.** Any public IP is still reachable (needed for npm/pip registries and S3/R2, which this policy can't name by hostname). Restricting egress to only the actual hostnames those need requires a CNI with FQDN-based `NetworkPolicy` support (e.g. Cilium) or an egress proxy - **not implemented in this repo**.
 
 ## Namespace isolation
 
